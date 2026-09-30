@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "6.3.0",
+    version: "6.4.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -111,7 +111,7 @@ async function callGroq(imageBase64, mimeType, attempt = 1, priorAnswer = "") {
         stream: false
       })
     },
-    7800
+    7500
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Groq HTTP ${response.status}`);
@@ -164,9 +164,12 @@ app.post("/api/analyze", async (req, res) => {
   // budget. Groq gets up to three verification passes inside that budget; Gemini
   // is used when Groq cannot produce a reliable final result.
   const isCoding = mode === "CODING";
-  const totalBudget = isCoding ? 90000 : 30000;
-  const geminiReserve = isCoding ? 30000 : 7000;
-  const groqBudget = Math.max(5000, totalBudget - geminiReserve);
+  const totalBudget = isCoding ? 90000 : 45000;
+  const geminiReserve = isCoding ? 30000 : 12000;
+  // Three Groq passes are capped at 7.5s each so the Gemini reserve is never
+  // eaten by the primary verification loop. Normal requests therefore finish
+  // comfortably inside the 45s server window.
+  const groqBudget = Math.min(totalBudget - geminiReserve, 22500);
 
   let bestAnswer = "";
   let previous = "";

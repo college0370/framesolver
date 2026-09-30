@@ -683,6 +683,8 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
 
   busy = true;
   const thisAnalysisVersion = ++analysisVersion;
+  apiCount++;
+  updateStats();
   lastAnalysis = Date.now();
   setBadge("ANALYZING", "busy");
   setStatus("Analyzing", "Reading the captured question carefully…");
@@ -692,7 +694,7 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
     const controller = new AbortController();
     // Normal questions get up to 32 seconds because correctness is now the
     // priority. Coding can use the longer 95-second window.
-    const clientTimeoutMs = 42000;
+    const clientTimeoutMs = 95000;
     const timeout = setTimeout(() => controller.abort(), clientTimeoutMs);
     let response;
     try {
@@ -724,7 +726,6 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
     showPopup(answerForDisplay);
     addHistory(answerForDisplay, parsed.type, parsed.question || "Detected question", parsed.options, parsed.explanation);
 
-    apiCount++;
     previousAnalyzedSignature = signature || null;
     updateStats();
 
