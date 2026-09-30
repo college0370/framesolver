@@ -57,7 +57,10 @@ let analysisVersion = 0;
 let watchState = "STARTUP";
 let handoffTimer = null;
 let handoffReference = null;
-let handoffRemaining = 7;
+const HANDOFF_SECONDS = 10;
+const DETECT_CHECK_MS = 250;
+let lastDetectCheck = 0;
+let handoffRemaining = HANDOFF_SECONDS;
 let history = loadHistory();
 
 const DETECT_W = 192;
@@ -174,35 +177,46 @@ function addHistory(answerText, type = "OTHER", questionText = "", options = [],
 function hideNextQuestionCountdown() {
   if (handoffTimer) clearInterval(handoffTimer);
   handoffTimer = null;
-  handoffRemaining = 7;
+  handoffRemaining = HANDOFF_SECONDS;
   if (nextQuestionCountdown) nextQuestionCountdown.classList.add("hidden");
 }
 
 function startNextQuestionCountdown(referenceFrame) {
   hideNextQuestionCountdown();
   handoffReference = referenceFrame ? new Uint8ClampedArray(referenceFrame) : null;
-  handoffRemaining = 7;
+  handoffRemaining = HANDOFF_SECONDS;
   nextQuestionSeconds.textContent = handoffRemaining;
   nextQuestionCountdown.classList.remove("hidden");
-  watchState = "HANDOFF";
-  setStatus("Answer ready", "Switch to the next question. Watching will start when the 7-second countdown ends.");
+  watchState = "WATCH_NEXT";
+  // The countdown is NOT a blind 10-second delay. We start watching immediately
+  // so a real question change can be detected quickly. If nothing changes for
+  // 10 seconds, we simply refresh the reference and restart the countdown while
+  // keeping the same answer visible.
+  baseline = handoffReference ? new Uint8ClampedArray(handoffReference) : captureDetectorFrame();
+  previous = baseline ? new Uint8ClampedArray(baseline) : previous;
+  candidate = null;
+  changed = false;
+  stableCount = 0;
+  lastDetectCheck = 0;
+  setBadge("WATCHING NEXT", "live");
+  setStatus("Watching for next question", `Checking the screen now. If nothing changes in ${HANDOFF_SECONDS} seconds, the same answer stays and the timer restarts.`);
 
   handoffTimer = setInterval(() => {
     handoffRemaining -= 1;
     nextQuestionSeconds.textContent = Math.max(0, handoffRemaining);
     if (handoffRemaining <= 0) {
-      clearInterval(handoffTimer);
-      handoffTimer = null;
-      nextQuestionCountdown.classList.add("hidden");
-      baseline = handoffReference ? new Uint8ClampedArray(handoffReference) : previous;
-      previous = baseline ? new Uint8ClampedArray(baseline) : previous;
+      // If a question change had already started, do not overwrite it.
+      if (changed || watchState !== "WATCH_NEXT") return;
+      const reference = captureDetectorFrame();
+      baseline = reference;
+      previous = reference ? new Uint8ClampedArray(reference) : previous;
       candidate = null;
-      changed = false;
       stableCount = 0;
+      lastDetectCheck = 0;
       meterBar.style.width = "0%";
-      watchState = "WATCH_NEXT";
-      setBadge("WATCHING NEXT", "live");
-      setStatus("Watching for next question", "Change the question on the phone. A new frame will be captured automatically.");
+      handoffRemaining = HANDOFF_SECONDS;
+      nextQuestionSeconds.textContent = HANDOFF_SECONDS;
+      setStatus("Still on same question", `No meaningful change detected. Keeping the current answer and restarting the ${HANDOFF_SECONDS}-second watch cycle.`);
     }
   }, 1000);
 }
@@ -217,8 +231,8 @@ function showPopup(answerText) {
   const parsed = parseAnswer(answerText);
   currentPopupText = parsed.answer || answerText.trim() || "No answer";
   popupAnswerEl.textContent = parsed.answer || answerText.trim() || "No answer";
-  popupExplanationEl.textContent = parsed.explanation || "";
-  popupExplanationEl.classList.toggle("hidden", !parsed.explanation);
+  popupExplanationEl.textContent = "";
+  popupExplanationEl.classList.add("hidden");
   popup.classList.remove("show");
   requestAnimationFrame(() => popup.classList.add("show"));
 
@@ -386,9 +400,8 @@ function loop() {
     ctx.drawImage(video, 0, 0, DETECT_W, DETECT_H);
     const current = new Uint8ClampedArray(ctx.getImageData(0, 0, DETECT_W, DETECT_H).data);
 
-    // During the 7-second handoff we deliberately do not run question-change
-    // detection. The user gets time to move to the next question.
     if (watchState === "HANDOFF") {
+      // Deliberately do not classify frames during the 10-second handoff.
       previous = current;
       raf = requestAnimationFrame(loop);
       return;
@@ -402,63 +415,68 @@ function loop() {
       }
       previous = current;
 
-      if (startupStableCount >= 6 && !busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
+      if (startupStableCount >= 4 && !busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
         baseline = current;
         startupStableCount = 0;
         watchState = "ANALYZING_FIRST";
-        setStatus("Question detected", "Analyzing the first stable question automatically…");
+        setStatus("Question detected", "Capturing the first stable question…");
         analyzeCapturedFrame(captureCurrentFrame(), false, visualSignature(current));
       }
     } else if (watchState === "WATCH_NEXT") {
-      const aligned = alignedChangeMetrics(baseline, current);
-      const tinyTextChange =
-        aligned.residualMean >= cfg.threshold &&
-        aligned.changedRatio >= 0.00022 &&
-        aligned.changedBlocks >= 1 &&
-        aligned.changedBlocks <= 70;
+      const now = performance.now();
+      if (now - lastDetectCheck < DETECT_CHECK_MS) {
+        raf = requestAnimationFrame(loop);
+        return;
+      }
+      lastDetectCheck = now;
 
-      const normalQuestionChange =
-        aligned.residualMean >= Math.max(1.15, cfg.threshold * 0.65) &&
-        aligned.changedRatio >= 0.00065 &&
-        aligned.changedBlocks >= 1 &&
-        aligned.changedBlocks <= 130;
+      // Fast first-pass comparison. Only if it crosses the threshold do we
+      // run the more expensive alignment check. This makes Q1 -> Q2 detection
+      // much more responsive on phones.
+      const quickDiff = meanDifference(baseline, current);
+      if (!changed && quickDiff >= 2.2) {
+        const aligned = alignedChangeMetrics(baseline, current);
+        const meaningfulChange =
+          aligned.residualMean >= Math.max(1.05, cfg.threshold * 0.55) &&
+          aligned.changedRatio >= 0.00035 &&
+          aligned.changedBlocks >= 1;
 
-      const meaningfulChange = tinyTextChange || normalQuestionChange;
-
-      if (!changed && meaningfulChange) {
-        changed = true;
-        hidePopup();
-        hideNextQuestionCountdown();
-        answerEl.textContent = "New question detected…";
-        answerEl.className = "answer empty";
-        candidate = current;
-        stableCount = 0;
-        meterBar.style.width = "20%";
-        setStatus("Question changed", "Confirming the new question before capture…");
+        if (meaningfulChange) {
+          changed = true;
+          hidePopup();
+          hideNextQuestionCountdown();
+          answerEl.textContent = "New question detected…";
+          answerEl.className = "answer empty";
+          candidate = current;
+          stableCount = 0;
+          meterBar.style.width = "15%";
+          setStatus("Question changed", "Confirming the new frame…");
+        }
       }
 
       if (changed) {
         const candidateDiff = candidate ? meanDifference(candidate, current) : 999;
         const frameDiff = previous ? meanDifference(previous, current) : 0;
-        if (candidateDiff < 1.55 && frameDiff < 1.7) stableCount++;
+        if (candidateDiff < 2.0 && frameDiff < 2.2) stableCount++;
         else stableCount = 0;
 
         candidate = current;
-        meterBar.style.width = `${Math.min(100, (stableCount / cfg.stableFrames) * 100)}%`;
+        meterBar.style.width = `${Math.min(100, (stableCount / Math.max(2, cfg.stableFrames)) * 100)}%`;
 
-        if (stableCount >= cfg.stableFrames) {
+        if (stableCount >= Math.max(2, cfg.stableFrames)) {
           const signature = visualSignature(current);
           const capture = captureCurrentFrame();
           changed = false;
           stableCount = 0;
           candidate = null;
           baseline = current;
+          previous = current;
           meterBar.style.width = "0%";
 
           if (signature === previousAnalyzedSignature) {
             skippedCount++;
             updateStats();
-            setStatus("Same question skipped", "Still watching for the next question change.");
+            setStatus("Same question", "No new answer needed. Continuing to watch.");
           } else if (!busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
             watchState = "ANALYZING_NEXT";
             analyzeCapturedFrame(capture, false, signature);
@@ -604,6 +622,12 @@ function visualSignature(data) {
   return signature;
 }
 
+function captureDetectorFrame() {
+  if (!video.videoWidth || !video.videoHeight) return previous;
+  ctx.drawImage(video, 0, 0, DETECT_W, DETECT_H);
+  return new Uint8ClampedArray(ctx.getImageData(0, 0, DETECT_W, DETECT_H).data);
+}
+
 function captureCurrentFrame() {
   const sourceW = video.videoWidth || 1280;
   const sourceH = video.videoHeight || 720;
@@ -743,7 +767,7 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
 
     setBadge("ANSWER READY", "live");
     meterBar.style.width = "0%";
-    // Freeze the answered question as the reference. The 7-second handoff
+    // Freeze the answered question as the reference. The handoff
     // gives the user time to switch screens/questions before detection starts.
     const answeredReference = baseline ? new Uint8ClampedArray(baseline) : (previous ? new Uint8ClampedArray(previous) : null);
     startNextQuestionCountdown(answeredReference);

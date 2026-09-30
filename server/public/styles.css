@@ -208,9 +208,12 @@ footer {
 /* Parakeet-style answer overlay */
 .answer-popup {
   position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
+  left: 50%;
+  right: auto;
+  top: 50%;
+  bottom: auto;
+  width: min(88%, 620px);
+  transform: translate(-50%, -50%) scale(.98);
   z-index: 10;
   padding: 13px 44px 14px 15px;
   border: 1px solid rgba(255,255,255,.18);
@@ -218,14 +221,14 @@ footer {
   background: rgba(7, 12, 22, .92);
   backdrop-filter: blur(12px);
   box-shadow: 0 10px 32px rgba(0,0,0,.38);
-  transform: translateY(18px) scale(.98);
+  transform: translate(-50%, -50%) scale(.98);
   opacity: 0;
   pointer-events: none;
   transition: opacity .18s ease, transform .18s ease;
 }
 .answer-popup.show {
   opacity: 1;
-  transform: translateY(0) scale(1);
+  transform: translate(-50%, -50%) scale(1);
   pointer-events: auto;
 }
 .popup-label {
@@ -263,7 +266,7 @@ footer {
 
 
 .history-card { padding: 15px; }
-.history-list { display: grid; gap: 10px; margin-top: 10px; }
+.history-list { display: none !important; }
 .history-empty { color: #64748b; font-size: 13px; padding: 12px 0; }
 .history-item { border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px; background: #f8fafc; }
 .history-meta { display:flex; justify-content:space-between; gap:10px; font-size:10px; font-weight:800; color:#64748b; text-transform:uppercase; }
