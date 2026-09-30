@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "6.4.0",
+    version: "6.7.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -78,16 +78,8 @@ async function fetchWithTimeout(url, options, ms) {
   }
 }
 
-async function callGroq(imageBase64, mimeType, attempt = 1, priorAnswer = "") {
+async function callGroq(imageBase64, mimeType) {
   if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY is not configured");
-  const attemptInstructions = [
-    "Solve the question independently. Read every visible word, number, symbol, statement, and option before answering.",
-    "Re-read the image carefully and independently verify the previous attempt. Pay special attention to digits, NOT/EXCEPT wording, options, and small text. Correct the answer if necessary.",
-    "Act as a final verifier. Re-read the image from scratch, compare it with the previous answer, and return the answer you believe is correct. Do not guess unreadable text."
-  ][Math.min(attempt - 1, 2)];
-  const verification = priorAnswer
-    ? `\nPrevious attempt to verify:\n${priorAnswer}\n`
-    : "";
   const response = await fetchWithTimeout(
     "https://api.groq.com/openai/v1/chat/completions",
     {
@@ -101,17 +93,20 @@ async function callGroq(imageBase64, mimeType, attempt = 1, priorAnswer = "") {
         messages: [{
           role: "user",
           content: [
-            { type: "text", text: `${prompt}\n\n${attemptInstructions}${verification}` },
+            {
+              type: "text",
+              text: `${prompt}\n\nSolve this captured question carefully in ONE pass. Read every visible word, number, symbol, statement, condition, and option before answering. For numerical questions, calculate carefully. For programming questions, fully read the statement and code before solving. Return the required structured answer without unnecessary reasoning.`
+            },
             { type: "image_url", image_url: { url: dataUrl(imageBase64, mimeType), detail: "high" } }
           ]
         }],
-        temperature: attempt === 1 ? 0.05 : 0,
+        temperature: 0,
         max_completion_tokens: 1300,
         reasoning_effort: "default",
         stream: false
       })
     },
-    7500
+    20000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Groq HTTP ${response.status}`);
@@ -159,96 +154,106 @@ app.post("/api/analyze", async (req, res) => {
   const { imageBase64, mimeType = "image/jpeg", mode = "AUTO" } = req.body || {};
   if (!imageBase64) return res.status(400).json({ error: "imageBase64 is required" });
 
+  // One question gets one strict 40-second budget.
+  // Attempt 1: Groq for up to 20s.
+  // If Groq errors, times out, or cannot reliably read the question,
+  // immediately use the remaining ~20s for Gemini.
   const started = Date.now();
-  // Normal questions get a correctness-first ~30s budget. Coding gets a longer
-  // budget. Groq gets up to three verification passes inside that budget; Gemini
-  // is used when Groq cannot produce a reliable final result.
+  const TOTAL_BUDGET_MS = 40000;
+  const GROQ_BUDGET_MS = 20000;
+  const GEMINI_BUDGET_MS = 19500;
   const isCoding = mode === "CODING";
-  const totalBudget = isCoding ? 90000 : 45000;
-  const geminiReserve = isCoding ? 30000 : 12000;
-  // Three Groq passes are capped at 7.5s each so the Gemini reserve is never
-  // eaten by the primary verification loop. Normal requests therefore finish
-  // comfortably inside the 45s server window.
-  const groqBudget = Math.min(totalBudget - geminiReserve, 22500);
 
-  let bestAnswer = "";
-  let previous = "";
-  let lastGroqError = "";
-  let lastParsed = null;
-  const groqStarted = Date.now();
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    if (Date.now() - started >= groqBudget) break;
-    try {
-      const answer = await callGroq(imageBase64, mimeType, attempt, previous);
-      bestAnswer = answer;
-      previous = answer;
-      lastParsed = parseStructuredAnswer(answer);
-
-      // Keep going through the three-pass Groq verification budget. The user
-      // explicitly prefers correctness over minimum latency.
-    } catch (error) {
-      lastGroqError = error?.message || "Groq failed";
-    }
-  }
-
-  // If Groq produced a readable answer, use it. For coding, use the longer
-  // Gemini verification pass as an additional correctness check.
-  const groqParsed = bestAnswer ? parseStructuredAnswer(bestAnswer) : null;
-  const groqReadable = bestAnswer && !looksUnreadable(bestAnswer) && groqParsed?.question;
-
-  if (groqReadable && !isCoding) {
-    return res.json({
-      answer: bestAnswer,
-      provider: "Groq (verified)",
-      model: groqModel,
-      elapsedMs: Date.now() - started,
-      groqAttempts: 3
-    });
-  }
-
-  const remaining = totalBudget - (Date.now() - started);
-  if (remaining <= 1000) {
-    if (bestAnswer) {
-      return res.json({
-        answer: bestAnswer,
-        provider: "Groq",
-        model: groqModel,
-        elapsedMs: Date.now() - started,
-        groqAttempts: 3
-      });
-    }
-    return res.status(503).json({ error: "Analysis could not finish within the response window.", groq: lastGroqError });
-  }
+  let groqAnswer = "";
+  let groqError = "";
+  let groqTimedOut = false;
 
   try {
-    const answer = await callGemini(imageBase64, mimeType, isCoding ? "CODING" : "NORMAL", Math.min(remaining, geminiReserve));
-    return res.json({
-      answer,
-      provider: "Gemini verification",
-      model: geminiModel,
-      elapsedMs: Date.now() - started,
-      groqAttempts: 3
-    });
+    groqAnswer = await callGroq(imageBase64, mimeType);
   } catch (error) {
-    if (bestAnswer) {
-      return res.json({
-        answer: bestAnswer,
-        provider: "Groq fallback",
-        model: groqModel,
-        elapsedMs: Date.now() - started,
-        groqAttempts: 3
-      });
-    }
-    return res.status(503).json({
-      error: isCoding
-        ? "Coding analysis could not finish within the verification window."
-        : "Analysis could not finish within the response window.",
-      groq: lastGroqError,
-      gemini: error?.message || "Gemini failed",
-      elapsedMs: Date.now() - started
+    groqError = error?.message || "Groq failed";
+    groqTimedOut = /abort|timeout|timed out/i.test(groqError);
+  }
+
+  const groqParsed = groqAnswer ? parseStructuredAnswer(groqAnswer) : null;
+  const groqReadable = !!(
+    groqAnswer &&
+    !looksUnreadable(groqAnswer) &&
+    groqParsed?.question &&
+    groqParsed?.answer
+  );
+
+  if (groqReadable) {
+    return res.json({
+      answer: groqAnswer,
+      provider: "Groq",
+      model: groqModel,
+      elapsedMs: Date.now() - started,
+      groqAttempts: 1
     });
   }
+
+  // This is the required automatic retry/fallback: the same captured frame
+  // is sent to Gemini. Never ask the user to press Analyze Now.
+  const elapsed = Date.now() - started;
+  const remaining = Math.min(
+    GEMINI_BUDGET_MS,
+    Math.max(0, TOTAL_BUDGET_MS - elapsed - 300)
+  );
+
+  if (remaining < 1000) {
+    return res.status(503).json({
+      error: "AI attempts exhausted the 40-second response window.",
+      groq: groqError || "Groq returned an unreadable response",
+      gemini: "No fallback time remained",
+      groqTimedOut,
+      elapsedMs: Date.now() - started,
+      groqAttempts: 1
+    });
+  }
+
+  let geminiError = "";
+  try {
+    const answer = await callGemini(
+      imageBase64,
+      mimeType,
+      isCoding ? "CODING" : "NORMAL",
+      remaining
+    );
+
+    return res.json({
+      answer,
+      provider: "Gemini fallback",
+      model: geminiModel,
+      elapsedMs: Date.now() - started,
+      groqAttempts: 1,
+      groqTimedOut
+    });
+  } catch (error) {
+    geminiError = error?.message || "Gemini failed";
+  }
+
+  // If Groq produced text but it was not structured enough for our parser,
+  // return it as a last-resort answer instead of throwing it away.
+  if (groqAnswer) {
+    return res.json({
+      answer: groqAnswer,
+      provider: "Groq last-resort",
+      model: groqModel,
+      elapsedMs: Date.now() - started,
+      groqAttempts: 1,
+      groqTimedOut
+    });
+  }
+
+  return res.status(503).json({
+    error: "Groq timed out/failed and Gemini fallback also failed.",
+    groq: groqError || "Groq returned no usable answer",
+    gemini: geminiError,
+    groqTimedOut,
+    elapsedMs: Date.now() - started,
+    groqAttempts: 1
+  });
 });
 
 function parseStructuredAnswer(text) {

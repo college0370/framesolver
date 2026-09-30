@@ -692,9 +692,10 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
   try {
     const imageBase64 = capture.imageBase64;
     const controller = new AbortController();
-    // Normal questions get up to 32 seconds because correctness is now the
-    // priority. Coding can use the longer 95-second window.
-    const clientTimeoutMs = 95000;
+    // The server owns a strict 40-second AI budget. Keep a tiny network/UI
+    // buffer here so the browser does not abort a response that finished at
+    // the deadline.
+    const clientTimeoutMs = 43000;
     const timeout = setTimeout(() => controller.abort(), clientTimeoutMs);
     let response;
     try {
