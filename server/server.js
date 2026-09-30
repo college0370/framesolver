@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "6.2.0",
+    version: "6.3.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -78,8 +78,16 @@ async function fetchWithTimeout(url, options, ms) {
   }
 }
 
-async function callGroq(imageBase64, mimeType) {
+async function callGroq(imageBase64, mimeType, attempt = 1, priorAnswer = "") {
   if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY is not configured");
+  const attemptInstructions = [
+    "Solve the question independently. Read every visible word, number, symbol, statement, and option before answering.",
+    "Re-read the image carefully and independently verify the previous attempt. Pay special attention to digits, NOT/EXCEPT wording, options, and small text. Correct the answer if necessary.",
+    "Act as a final verifier. Re-read the image from scratch, compare it with the previous answer, and return the answer you believe is correct. Do not guess unreadable text."
+  ][Math.min(attempt - 1, 2)];
+  const verification = priorAnswer
+    ? `\nPrevious attempt to verify:\n${priorAnswer}\n`
+    : "";
   const response = await fetchWithTimeout(
     "https://api.groq.com/openai/v1/chat/completions",
     {
@@ -93,17 +101,17 @@ async function callGroq(imageBase64, mimeType) {
         messages: [{
           role: "user",
           content: [
-            { type: "text", text: prompt },
-            { type: "image_url", image_url: { url: dataUrl(imageBase64, mimeType) } }
+            { type: "text", text: `${prompt}\n\n${attemptInstructions}${verification}` },
+            { type: "image_url", image_url: { url: dataUrl(imageBase64, mimeType), detail: "high" } }
           ]
         }],
-        temperature: 0,
-        max_completion_tokens: 1100,
-        reasoning_effort: "none",
+        temperature: attempt === 1 ? 0.05 : 0,
+        max_completion_tokens: 1300,
+        reasoning_effort: "default",
         stream: false
       })
     },
-    16000
+    7800
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Groq HTTP ${response.status}`);
@@ -112,7 +120,7 @@ async function callGroq(imageBase64, mimeType) {
   return answer;
 }
 
-async function callGemini(imageBase64, mimeType, mode = "NORMAL") {
+async function callGemini(imageBase64, mimeType, mode = "NORMAL", timeoutMs = null) {
   if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
   const response = await fetchWithTimeout(
@@ -131,11 +139,11 @@ async function callGemini(imageBase64, mimeType, mode = "NORMAL") {
         generationConfig: {
           temperature: 0,
           maxOutputTokens: 1200,
-          thinkingConfig: { thinkingLevel: "low" }
+          thinkingConfig: { thinkingLevel: mode === "CODING" ? "high" : "medium" }
         }
       })
     },
-    mode === "CODING" ? 60000 : 11000
+    timeoutMs || (mode === "CODING" ? 60000 : 11000)
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);
@@ -148,44 +156,110 @@ async function callGemini(imageBase64, mimeType, mode = "NORMAL") {
 }
 
 app.post("/api/analyze", async (req, res) => {
-  const { imageBase64, mimeType = "image/jpeg", forceFallback = false, mode = "NORMAL" } = req.body || {};
+  const { imageBase64, mimeType = "image/jpeg", mode = "AUTO" } = req.body || {};
   if (!imageBase64) return res.status(400).json({ error: "imageBase64 is required" });
 
   const started = Date.now();
-  let groqError = "";
-  if (!forceFallback) {
+  // Normal questions get a correctness-first ~30s budget. Coding gets a longer
+  // budget. Groq gets up to three verification passes inside that budget; Gemini
+  // is used when Groq cannot produce a reliable final result.
+  const isCoding = mode === "CODING";
+  const totalBudget = isCoding ? 90000 : 30000;
+  const geminiReserve = isCoding ? 30000 : 7000;
+  const groqBudget = Math.max(5000, totalBudget - geminiReserve);
+
+  let bestAnswer = "";
+  let previous = "";
+  let lastGroqError = "";
+  let lastParsed = null;
+  const groqStarted = Date.now();
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (Date.now() - started >= groqBudget) break;
     try {
-      const answer = await callGroq(imageBase64, mimeType);
-      return res.json({ answer, provider: "Groq", model: groqModel, elapsedMs: Date.now() - started });
+      const answer = await callGroq(imageBase64, mimeType, attempt, previous);
+      bestAnswer = answer;
+      previous = answer;
+      lastParsed = parseStructuredAnswer(answer);
+
+      // Keep going through the three-pass Groq verification budget. The user
+      // explicitly prefers correctness over minimum latency.
     } catch (error) {
-      groqError = error?.message || "Groq failed";
-      console.warn("Groq failed; trying Gemini fallback:", groqError);
+      lastGroqError = error?.message || "Groq failed";
     }
-  } else {
-    groqError = "Groq unreadable response; forced Gemini fallback";
+  }
+
+  // If Groq produced a readable answer, use it. For coding, use the longer
+  // Gemini verification pass as an additional correctness check.
+  const groqParsed = bestAnswer ? parseStructuredAnswer(bestAnswer) : null;
+  const groqReadable = bestAnswer && !looksUnreadable(bestAnswer) && groqParsed?.question;
+
+  if (groqReadable && !isCoding) {
+    return res.json({
+      answer: bestAnswer,
+      provider: "Groq (verified)",
+      model: groqModel,
+      elapsedMs: Date.now() - started,
+      groqAttempts: 3
+    });
+  }
+
+  const remaining = totalBudget - (Date.now() - started);
+  if (remaining <= 1000) {
+    if (bestAnswer) {
+      return res.json({
+        answer: bestAnswer,
+        provider: "Groq",
+        model: groqModel,
+        elapsedMs: Date.now() - started,
+        groqAttempts: 3
+      });
+    }
+    return res.status(503).json({ error: "Analysis could not finish within the response window.", groq: lastGroqError });
   }
 
   try {
-    const answer = await callGemini(imageBase64, mimeType, mode);
+    const answer = await callGemini(imageBase64, mimeType, isCoding ? "CODING" : "NORMAL", Math.min(remaining, geminiReserve));
     return res.json({
       answer,
-      provider: "Gemini fallback",
+      provider: "Gemini verification",
       model: geminiModel,
-      elapsedMs: Date.now() - started
+      elapsedMs: Date.now() - started,
+      groqAttempts: 3
     });
   } catch (error) {
-    const geminiError = error?.message || "Gemini fallback failed";
-    console.error("Both AI providers failed", { groqError, geminiError });
+    if (bestAnswer) {
+      return res.json({
+        answer: bestAnswer,
+        provider: "Groq fallback",
+        model: groqModel,
+        elapsedMs: Date.now() - started,
+        groqAttempts: 3
+      });
+    }
     return res.status(503).json({
-      error: mode === "CODING"
-        ? "Coding analysis could not finish within the allowed verification window."
-        : "Analysis could not finish within the normal response window.",
-      groq: groqError,
-      gemini: geminiError,
+      error: isCoding
+        ? "Coding analysis could not finish within the verification window."
+        : "Analysis could not finish within the response window.",
+      groq: lastGroqError,
+      gemini: error?.message || "Gemini failed",
       elapsedMs: Date.now() - started
     });
   }
 });
+
+function parseStructuredAnswer(text) {
+  const normalized = String(text || "").replace(/\r/g, "");
+  const questionMatch = normalized.match(/(?:\*\*)?QUESTION(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?OPTIONS(?:\*\*)?\s*:|\n\s*(?:\*\*)?ANSWER(?:\*\*)?\s*:|$)/i);
+  const answerMatch = normalized.match(/(?:\*\*)?ANSWER(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?EXPLANATION(?:\*\*)?\s*:|$)/i);
+  return { question: questionMatch?.[1]?.trim() || "", answer: answerMatch?.[1]?.trim() || "" };
+}
+function normalizeAnswer(text) {
+  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+function looksUnreadable(text) {
+  return /unable to read|cannot read|can't read|unreadable|not readable|too blurry|could not recover/i.test(String(text || ""));
+}
 
 app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));

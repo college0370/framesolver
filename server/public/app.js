@@ -54,6 +54,8 @@ let analysisVersion = 0;
 let latestQuestionVersion = 0;
 let motionReacquire = false;
 let motionStableCount = 0;
+let settleStartedAt = 0;
+let settleLastChangeAt = 0;
 let history = loadHistory();
 
 const DETECT_W = 192;
@@ -314,6 +316,8 @@ function stopCamera() {
   latestQuestionVersion++;
   motionReacquire = false;
   motionStableCount = 0;
+  settleStartedAt = 0;
+  settleLastChangeAt = 0;
   hidePopup();
   setBadge("READY", "idle");
   setStatus("Stopped", "Camera monitoring is off.");
@@ -413,21 +417,43 @@ function loop() {
       }
 
       if (changed) {
-        // Compare candidate and current: the new frame must stop moving before
-        // we send it. This prevents camera shake from producing requests.
+        // IMPORTANT: once a meaningful question change is detected, do not
+        // require perfectly identical frames. Phone-camera screens naturally
+        // have tiny brightness/pixel fluctuations, which previously caused
+        // the automatic pipeline to remain stuck on "waiting for stability".
+        // We now use a short settle window with a hard maximum.
+        if (!settleStartedAt) {
+          settleStartedAt = Date.now();
+          settleLastChangeAt = Date.now();
+        }
+
         const candidateDiff = candidate ? meanDifference(candidate, current) : 999;
-        if (candidateDiff < 1.55 && frameDiff < 1.7) stableCount++;
-        else stableCount = 0;
-
+        if (candidateDiff >= 1.7 || frameDiff >= 2.0) {
+          settleLastChangeAt = Date.now();
+          stableCount = 0;
+        } else {
+          stableCount++;
+        }
         candidate = current;
-        meterBar.style.width = `${Math.min(100, (stableCount / cfg.stableFrames) * 100)}%`;
 
-        if (stableCount >= cfg.stableFrames) {
+        const quietFor = Date.now() - settleLastChangeAt;
+        const totalSettle = Date.now() - settleStartedAt;
+        const enoughQuiet = quietFor >= 450;
+        const hardSettle = totalSettle >= 1400;
+        const enoughFrames = stableCount >= 2;
+        meterBar.style.width = `${Math.min(100, Math.max(5, (quietFor / 700) * 100))}%`;
+
+        // Capture automatically as soon as the frame is reasonably settled,
+        // or at 1.4s latest. This removes the gap where the UI detected the
+        // question but never dispatched an automatic request.
+        if ((enoughQuiet && enoughFrames) || hardSettle) {
           const signature = visualSignature(current);
           const capture = captureCurrentFrame();
           changed = false;
           stableCount = 0;
           candidate = null;
+          settleStartedAt = 0;
+          settleLastChangeAt = 0;
           baseline = current;
           meterBar.style.width = "0%";
 
@@ -435,16 +461,21 @@ function loop() {
             skippedCount++;
             updateStats();
             setStatus("Same question skipped", "No AI request — waiting for the next meaningful text change.");
-          } else if (!busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
-            analyzeCapturedFrame(capture, false, signature);
           } else {
-            // Never lose a question just because the previous AI request is
-            // still running. Keep the newest stable frame and analyze it as
-            // soon as the current request finishes.
+            // Always queue a detected question if another request is busy.
+            // The newest stable frame is preserved and dispatched when the
+            // current request finishes.
             pendingCapture = capture;
             pendingSignature = signature;
-            pendingQuestionVersion++;
-            setStatus("Question queued", "Previous answer is still processing; the newest question will be analyzed next.");
+            if (!busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
+              const nextCapture = pendingCapture;
+              const nextSignature = pendingSignature;
+              pendingCapture = null;
+              pendingSignature = null;
+              analyzeCapturedFrame(nextCapture, false, nextSignature);
+            } else {
+              setStatus("Question queued", "New question captured automatically; it will be analyzed as soon as the current request finishes.");
+            }
           }
         }
       }
@@ -654,12 +685,15 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
   const thisAnalysisVersion = ++analysisVersion;
   lastAnalysis = Date.now();
   setBadge("ANALYZING", "busy");
-  setStatus("Analyzing", "Reading the exact captured question…");
+  setStatus("Analyzing", "Reading the captured question carefully…");
 
   try {
     const imageBase64 = capture.imageBase64;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 90000);
+    // Normal questions get up to 32 seconds because correctness is now the
+    // priority. Coding can use the longer 95-second window.
+    const clientTimeoutMs = 42000;
+    const timeout = setTimeout(() => controller.abort(), clientTimeoutMs);
     let response;
     try {
       response = await fetch("/api/analyze", {
@@ -672,54 +706,22 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
       clearTimeout(timeout);
     }
 
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
 
-    let answerText = String(data.answer || "");
-    let parsed = parseAnswer(answerText);
-    const unreadable = /unable to read|cannot read|can't read|unreadable|not readable|image is too blurry|text is too blurry/i.test(answerText);
-    const weakRead = !parsed.question || parsed.question.length < 8 || /detected question/i.test(parsed.question);
-
-    if ((unreadable || weakRead || parsed.type === "CODING") && data.provider === "Groq") {
-      setStatus(
-        parsed.type === "CODING" ? "Verifying code" : "Reading again",
-        parsed.type === "CODING"
-          ? "Coding question detected — allowing the longer verification pass…"
-          : "Groq could not confidently read the frame; trying Gemini…"
-      );
-      const retryController = new AbortController();
-      const retryTimeout = setTimeout(() => retryController.abort(), parsed.type === "CODING" ? 60000 : 10000);
-      let retryResponse;
-      try {
-        retryResponse = await fetch("/api/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ imageBase64, mimeType: "image/jpeg", forceFallback: true, mode: parsed.type === "CODING" ? "CODING" : "NORMAL" }),
-          signal: retryController.signal
-        });
-      } finally {
-        clearTimeout(retryTimeout);
-      }
-      const retryData = await retryResponse.json();
-      if (retryResponse.ok && retryData.answer) {
-        data.answer = retryData.answer;
-        data.provider = retryData.provider || "Gemini fallback";
-        answerText = String(data.answer);
-        parsed = parseAnswer(answerText);
-      }
-    }
-
-    // Never let a late response for an older question overwrite a newer
-    // question. This is the main stale-answer protection.
+    // Never let a late response for an older question overwrite a newer one.
     if (!manual && questionVersionAtStart !== latestQuestionVersion) {
-      setStatus("New question ready", "Discarded a late answer for the previous question; processing the newest frame.");
+      setStatus("New question ready", "Discarded the older response; the newest captured question remains queued.");
       return;
     }
 
-    const answerForDisplay = parsed.answer || data.answer;
+    const answerText = String(data.answer || "");
+    const parsed = parseAnswer(answerText);
+    const answerForDisplay = parsed.answer || answerText;
+
     answerEl.textContent = answerForDisplay;
     answerEl.className = "answer";
-    showPopup(data.answer);
+    showPopup(answerForDisplay);
     addHistory(answerForDisplay, parsed.type, parsed.question || "Detected question", parsed.options, parsed.explanation);
 
     apiCount++;
@@ -727,69 +729,28 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
     updateStats();
 
     setBadge("ANSWER READY", "live");
-    setStatus("Answer ready", "Popup shown. Watching for the next meaningful question/text change.");
+    setStatus("Answer ready", `Verified through ${data.provider || "AI"}. Watching for the next meaningful question/text change.`);
     meterBar.style.width = "0%";
   } catch (err) {
-    // Automatic analysis gets one fresh Gemini-only attempt for the exact same
-    // captured frame. This fixes the case where the first background request
-    // times out/transiently fails but the same image succeeds when Analyze Now
-    // is pressed manually. It is limited to once per question version so the
-    // app cannot loop or burn quota.
-    if (!manual && autoRetryUsedForVersion !== questionVersionAtStart && stream) {
-      autoRetryUsedForVersion = questionVersionAtStart;
-      setBadge("RETRYING", "busy");
-      setStatus("Retrying current question", "The first automatic request did not finish; retrying the same captured frame once…");
-      try {
-        const retryController = new AbortController();
-        const retryTimeout = setTimeout(() => retryController.abort(), 11000);
-        let retryResponse;
-        try {
-          retryResponse = await fetch("/api/analyze", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ imageBase64: capture.imageBase64, mimeType: "image/jpeg", forceFallback: true, mode: "NORMAL" }),
-            signal: retryController.signal
-          });
-        } finally {
-          clearTimeout(retryTimeout);
-        }
-        const retryData = await retryResponse.json().catch(() => ({}));
-        if (retryResponse.ok && retryData.answer) {
-          // If a newer question appeared while the retry was running, never
-          // let this older response overwrite it.
-          if (questionVersionAtStart === latestQuestionVersion) {
-            const retryAnswerText = String(retryData.answer);
-            const retryParsed = parseAnswer(retryAnswerText);
-            const answerForDisplay = retryParsed.answer || retryAnswerText;
-            answerEl.textContent = answerForDisplay;
-            answerEl.className = "answer";
-            showPopup(retryAnswerText);
-            addHistory(answerForDisplay, retryParsed.type, retryParsed.question || "Detected question", retryParsed.options, retryParsed.explanation);
-            apiCount++;
-            previousAnalyzedSignature = signature || null;
-            updateStats();
-            setBadge("ANSWER READY", "live");
-            setStatus("Answer ready", "Automatic retry succeeded. Watching for the next meaningful question/text change.");
-            meterBar.style.width = "0%";
-            return;
-          }
-        }
-      } catch (retryErr) {
-        // Fall through to the normal error state; the next meaningful question
-        // gets a fresh automatic attempt.
-      }
+    // A new question may have appeared while the previous one was processing.
+    // Do not surface a stale error over the new question; queue processing is
+    // handled in finally below.
+    if (!manual && questionVersionAtStart !== latestQuestionVersion) {
+      setStatus("New question ready", "The previous request ended late; the newer question is being processed.");
+      return;
     }
 
+    hidePopup();
     setBadge("ERROR", "busy");
     const message = err?.name === "AbortError"
-      ? "Automatic AI request timed out after the normal response window."
+      ? "AI request reached the response limit without a reliable answer."
       : (err.message || "Try again.");
     setStatus("Analysis failed", message);
   } finally {
     busy = false;
 
-    // If a newer question arrived while this request was running, immediately
-    // process the newest stable capture instead of leaving the old answer on screen.
+    // Immediately process the newest stable question. Do not leave the UI
+    // waiting for a manual Analyze Now click.
     if (pendingCapture && pendingSignature && pendingSignature !== previousAnalyzedSignature && stream) {
       const nextCapture = pendingCapture;
       const nextSignature = pendingSignature;
@@ -800,7 +761,7 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
       answerEl.className = "answer empty";
       setTimeout(() => {
         if (stream && !busy) analyzeCapturedFrame(nextCapture, false, nextSignature);
-      }, 120);
+      }, 50);
     }
   }
 }

@@ -77,11 +77,11 @@ The v5.1 server uses a hard 20-second AI request timeout and the browser uses a 
 - Coding keeps the longer verification path.
 
 
-## v6.2 automatic retry
+## v6.3 automatic retry
 If an automatic normal-question request fails or times out, the exact captured frame gets one Gemini-only retry. A newer question can never be overwritten by a late older response.
 
 
-## v6.2 UI update
+## v6.3 UI update
 - Large centered answer popup with answer only (no explanation).
 - Page order: camera, status, AI Answer, History controls.
 - History contents remain stored locally but are not displayed on the page.
