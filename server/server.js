@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "6.7.0",
+    version: "6.8.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -101,12 +101,15 @@ async function callGroq(imageBase64, mimeType) {
           ]
         }],
         temperature: 0,
-        max_completion_tokens: 1300,
-        reasoning_effort: "default",
+        max_completion_tokens: 900,
+        // Fast visual/OCR pass. Reasoning is deliberately disabled so the
+        // model spends its time reading the screenshot and producing the answer.
+        reasoning_effort: "none",
+        reasoning_format: "hidden",
         stream: false
       })
     },
-    20000
+    14000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Groq HTTP ${response.status}`);
@@ -154,15 +157,13 @@ app.post("/api/analyze", async (req, res) => {
   const { imageBase64, mimeType = "image/jpeg", mode = "AUTO" } = req.body || {};
   if (!imageBase64) return res.status(400).json({ error: "imageBase64 is required" });
 
-  // One question gets one strict 40-second budget.
-  // Attempt 1: Groq for up to 20s.
-  // If Groq errors, times out, or cannot reliably read the question,
-  // immediately use the remaining ~20s for Gemini.
+  // One captured question gets one strict 40-second AI window.
+  // Pass 1: fast Groq visual/OCR answer (max 14s).
+  // If Groq fails, times out, or returns an unreadable answer, retry the
+  // SAME captured frame with Gemini using the remaining time (up to 25s).
   const started = Date.now();
   const TOTAL_BUDGET_MS = 40000;
-  const GROQ_BUDGET_MS = 20000;
-  const GEMINI_BUDGET_MS = 19500;
-  const isCoding = mode === "CODING";
+  const GEMINI_MAX_MS = 25000;
 
   let groqAnswer = "";
   let groqError = "";
@@ -193,44 +194,35 @@ app.post("/api/analyze", async (req, res) => {
     });
   }
 
-  // This is the required automatic retry/fallback: the same captured frame
-  // is sent to Gemini. Never ask the user to press Analyze Now.
-  const elapsed = Date.now() - started;
+  // Automatic retry/fallback: same image, no new capture required.
   const remaining = Math.min(
-    GEMINI_BUDGET_MS,
-    Math.max(0, TOTAL_BUDGET_MS - elapsed - 300)
+    GEMINI_MAX_MS,
+    Math.max(0, TOTAL_BUDGET_MS - (Date.now() - started) - 250)
   );
 
-  if (remaining < 1000) {
-    return res.status(503).json({
-      error: "AI attempts exhausted the 40-second response window.",
-      groq: groqError || "Groq returned an unreadable response",
-      gemini: "No fallback time remained",
-      groqTimedOut,
-      elapsedMs: Date.now() - started,
-      groqAttempts: 1
-    });
-  }
-
   let geminiError = "";
-  try {
-    const answer = await callGemini(
-      imageBase64,
-      mimeType,
-      isCoding ? "CODING" : "NORMAL",
-      remaining
-    );
+  if (remaining >= 2000) {
+    try {
+      const answer = await callGemini(
+        imageBase64,
+        mimeType,
+        "NORMAL",
+        remaining
+      );
 
-    return res.json({
-      answer,
-      provider: "Gemini fallback",
-      model: geminiModel,
-      elapsedMs: Date.now() - started,
-      groqAttempts: 1,
-      groqTimedOut
-    });
-  } catch (error) {
-    geminiError = error?.message || "Gemini failed";
+      return res.json({
+        answer,
+        provider: "Gemini fallback",
+        model: geminiModel,
+        elapsedMs: Date.now() - started,
+        groqAttempts: 1,
+        groqTimedOut
+      });
+    } catch (error) {
+      geminiError = error?.message || "Gemini failed";
+    }
+  } else {
+    geminiError = "Not enough time remained for Gemini";
   }
 
   // If Groq produced text but it was not structured enough for our parser,
@@ -247,8 +239,8 @@ app.post("/api/analyze", async (req, res) => {
   }
 
   return res.status(503).json({
-    error: "Groq timed out/failed and Gemini fallback also failed.",
-    groq: groqError || "Groq returned no usable answer",
+    error: "Both AI attempts failed within the 40-second window.",
+    groq: groqError || "Groq returned an unreadable answer",
     gemini: geminiError,
     groqTimedOut,
     elapsedMs: Date.now() - started,
