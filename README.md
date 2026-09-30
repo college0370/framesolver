@@ -1,82 +1,18 @@
-# FrameSolve AI v5.5 — Character Change Detection + Groq/Gemini
+# FrameSolve Web v7.0 — 7-Second Question Handoff
 
-Fast mobile-first practice assistant for the user's own non-proctored mock/practice material.
+This build keeps the v5.9 AI request path and changes the question-detection state machine.
 
-## Flow
+## New flow
+1. Camera starts and detects the first stable question.
+2. It captures and sends the question to the existing AI endpoint.
+3. When an answer is successfully shown, a small **Next question in 7** countdown appears at the top-left of the camera.
+4. During the 7-second countdown, question-change detection is paused so the user can switch to the next question.
+5. At 0, the answered question's frame becomes the reference image.
+6. The detector watches for a meaningful change in the question/options region.
+7. When a new question is stable, the old answer popup is hidden, the new frame is captured, and AI analysis starts.
+8. After the next answer, the 7-second cycle repeats indefinitely.
 
-**Phone camera → local character/text/number change detection → stable changed frame → Groq vision → Gemini verification/fallback → popup answer → history**
+The countdown is a UI handoff timer, not an AI timeout. It does not limit how long an AI answer may take.
 
-The browser does the continuous detection locally. It does **not** send camera frames continuously to the AI provider.
-
-### Detects changes such as
-
-- Question number changes
-- A changed number or character
-- Changed question text
-- Changed MCQ option text
-- Fill-in-the-blank changes
-- Scrolling to another question
-
-Broad camera movement/shake is filtered by requiring a localized change and a stable new frame.
-
-## AI provider
-
-This version uses Groq's multimodal `qwen/qwen3.8-27b` model. Groq documents image input, OCR/visual question answering, and low-latency inference for this model.
-
-Create a Groq API key and set it on Render as:
-
-```text
-GROQ_API_KEY=your_key
-GROQ_MODEL=qwen/qwen3.8-27b
-```
-
-Never put the API key in browser JavaScript or commit it to GitHub.
-
-## Render
-
-Root Directory: `server`
-
-Build Command: `npm install`
-
-Start Command: `npm start`
-
-Environment variables:
-
-- `GROQ_API_KEY`
-- `GROQ_MODEL` = `qwen/qwen3.8-27b`
-
-## Important
-
-No AI system can guarantee a fixed response time because network/provider availability can vary. This app minimizes avoidable delay by making only one request for each meaningful question change and by using a short output.
-
-Use only with your own non-proctored practice/mock material.
-
-
-### 30-second response target
-The v5.1 server uses a hard 20-second AI request timeout and the browser uses a 22-second request timeout. The app does not retry timed-out requests, so it will not wait minutes for a single answer.
-
-
-### v5.5 timing and detection
-- Detection resolution increased to 192×144 for smaller character/digit changes.
-- The detector aligns frames to suppress small camera/table movement while preserving localized text changes.
-- A meaningful character, digit, word, option, or question-number change triggers a new analysis after the frame stabilizes.
-- Same question is not repeatedly sent to AI.
-- Normal Groq request has a ~20s server cap; normal Gemini fallback is ~8s.
-- Coding results can receive a longer Gemini verification pass of up to ~60s after the fast Groq result.
-- Browser request timeout is 90s so the coding verification window is not cut off.
-- Capture uses up to 1280px JPEG at quality 0.88 for better code/text readability.
-- History stores the model-returned question text, answer, type, and time; Copy/View are available.
-
-
-## v5.9 image readability update
-- Captures up to 1600px wide at JPEG quality 0.92.
-- Removes only the extreme bottom camera/browser area and preserves the full question/options region.
-- Applies mild contrast and glare normalization to make screen text more visible.
-- Vision prompt explicitly ignores watermarks, logos, timestamps, UI labels, and email addresses that are unrelated to the question.
-- Normal Groq request is bounded to 16s; Gemini fallback is bounded to 9s, keeping normal analysis around a 25s window.
-- Coding keeps the longer verification path.
-
-
-## v7.0 Diagnostic build
-This build keeps the v5.9 AI request as the baseline and adds provider diagnostics.
-Use **Test AI** while the camera is running. It sends the current captured frame to Groq and, only if Groq fails, Gemini. The diagnostic box shows HTTP status, error message, rate-limit headers, elapsed time, and Gemini error status. Do not share API keys.
+## Deployment
+Replace the repository `server` folder with this `server` folder and push to GitHub. Render can redeploy the existing service.

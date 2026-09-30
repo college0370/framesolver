@@ -5,8 +5,6 @@ const ctx = canvas.getContext("2d", { willReadFrequently: true });
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const captureBtn = document.getElementById("captureBtn");
-const diagnosticBtn = document.getElementById("diagnosticBtn");
-const diagnosticOutput = document.getElementById("diagnosticOutput");
 const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
 const popupCloseBtn = document.getElementById("popupCloseBtn");
@@ -21,6 +19,8 @@ const answerEl = document.getElementById("answer");
 const popupAnswerEl = document.getElementById("popupAnswer");
 const popupExplanationEl = document.getElementById("popupExplanation");
 const popup = document.getElementById("answerPopup");
+const nextQuestionCountdown = document.getElementById("nextQuestionCountdown");
+const nextQuestionSeconds = document.getElementById("nextQuestionSeconds");
 const badge = document.getElementById("stateBadge");
 const meterBar = document.getElementById("meterBar");
 const placeholder = document.getElementById("cameraPlaceholder");
@@ -54,6 +54,10 @@ let pendingCapture = null;
 let pendingSignature = null;
 let pendingQuestionVersion = 0;
 let analysisVersion = 0;
+let watchState = "STARTUP";
+let handoffTimer = null;
+let handoffReference = null;
+let handoffRemaining = 7;
 let history = loadHistory();
 
 const DETECT_W = 192;
@@ -167,6 +171,42 @@ function addHistory(answerText, type = "OTHER", questionText = "", options = [],
   renderHistory();
 }
 
+function hideNextQuestionCountdown() {
+  if (handoffTimer) clearInterval(handoffTimer);
+  handoffTimer = null;
+  handoffRemaining = 7;
+  if (nextQuestionCountdown) nextQuestionCountdown.classList.add("hidden");
+}
+
+function startNextQuestionCountdown(referenceFrame) {
+  hideNextQuestionCountdown();
+  handoffReference = referenceFrame ? new Uint8ClampedArray(referenceFrame) : null;
+  handoffRemaining = 7;
+  nextQuestionSeconds.textContent = handoffRemaining;
+  nextQuestionCountdown.classList.remove("hidden");
+  watchState = "HANDOFF";
+  setStatus("Answer ready", "Switch to the next question. Watching will start when the 7-second countdown ends.");
+
+  handoffTimer = setInterval(() => {
+    handoffRemaining -= 1;
+    nextQuestionSeconds.textContent = Math.max(0, handoffRemaining);
+    if (handoffRemaining <= 0) {
+      clearInterval(handoffTimer);
+      handoffTimer = null;
+      nextQuestionCountdown.classList.add("hidden");
+      baseline = handoffReference ? new Uint8ClampedArray(handoffReference) : previous;
+      previous = baseline ? new Uint8ClampedArray(baseline) : previous;
+      candidate = null;
+      changed = false;
+      stableCount = 0;
+      meterBar.style.width = "0%";
+      watchState = "WATCH_NEXT";
+      setBadge("WATCHING NEXT", "live");
+      setStatus("Watching for next question", "Change the question on the phone. A new frame will be captured automatically.");
+    }
+  }, 1000);
+}
+
 function hidePopup() {
   popup.classList.remove("show");
   if (lastPopupTimer) clearTimeout(lastPopupTimer);
@@ -216,6 +256,8 @@ function resetSession() {
   answerEl.textContent = "No answer yet.";
   answerEl.className = "answer empty";
   hidePopup();
+  hideNextQuestionCountdown();
+  watchState = stream ? "STARTUP" : "STARTUP";
   setStatus(stream ? "Watching" : "Ready", "Detection counters reset.");
 }
 
@@ -260,7 +302,6 @@ renderHistory();
 startBtn.onclick = startCamera;
 stopBtn.onclick = stopCamera;
 captureBtn.onclick = () => analyzeCurrentFrame(true);
-diagnosticBtn.onclick = runAIDiagnostic;
 
 async function startCamera() {
   try {
@@ -288,11 +329,13 @@ async function startCamera() {
     previousAnalyzedSignature = null;
     pendingCapture = null;
     pendingSignature = null;
+    watchState = "STARTUP";
+    hideNextQuestionCountdown();
+    handoffReference = null;
 
     startBtn.disabled = true;
     stopBtn.disabled = false;
     captureBtn.disabled = false;
-      diagnosticBtn.disabled = false;
     placeholder.classList.add("hidden");
     scanLine.classList.remove("hidden");
     hidePopup();
@@ -317,7 +360,6 @@ function stopCamera() {
   startBtn.disabled = false;
   stopBtn.disabled = true;
   captureBtn.disabled = true;
-    diagnosticBtn.disabled = true;
   placeholder.classList.remove("hidden");
   scanLine.classList.add("hidden");
   previous = null;
@@ -328,6 +370,9 @@ function stopCamera() {
   startupStableCount = 0;
   pendingCapture = null;
   pendingSignature = null;
+  hideNextQuestionCountdown();
+  handoffReference = null;
+  watchState = "STOPPED";
   hidePopup();
   setBadge("READY", "idle");
   setStatus("Stopped", "Camera monitoring is off.");
@@ -341,6 +386,14 @@ function loop() {
     ctx.drawImage(video, 0, 0, DETECT_W, DETECT_H);
     const current = new Uint8ClampedArray(ctx.getImageData(0, 0, DETECT_W, DETECT_H).data);
 
+    // During the 7-second handoff we deliberately do not run question-change
+    // detection. The user gets time to move to the next question.
+    if (watchState === "HANDOFF") {
+      previous = current;
+      raf = requestAnimationFrame(loop);
+      return;
+    }
+
     if (!baseline) {
       if (previous) {
         const frameDiff = meanDifference(previous, current);
@@ -352,19 +405,11 @@ function loop() {
       if (startupStableCount >= 6 && !busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
         baseline = current;
         startupStableCount = 0;
+        watchState = "ANALYZING_FIRST";
         setStatus("Question detected", "Analyzing the first stable question automatically…");
         analyzeCapturedFrame(captureCurrentFrame(), false, visualSignature(current));
       }
-    } else {
-      const metrics = changeMetrics(baseline, current);
-      const frameDiff = previous ? meanDifference(previous, current) : 0;
-
-      // Localized text/number changes are the primary trigger. Broad changes
-      // across most blocks are treated as camera shake and ignored.
-      // Very small localized edits (a digit, character, punctuation mark,
-      // or one word) can be only a few dozen pixels at detection resolution.
-      // We therefore use an aligned residual metric rather than requiring a
-      // large percentage of the whole screen to change.
+    } else if (watchState === "WATCH_NEXT") {
       const aligned = alignedChangeMetrics(baseline, current);
       const tinyTextChange =
         aligned.residualMean >= cfg.threshold &&
@@ -382,21 +427,19 @@ function loop() {
 
       if (!changed && meaningfulChange) {
         changed = true;
-        // A genuinely new question has appeared. Never leave the previous
-        // answer visible while the new question is being analyzed.
         hidePopup();
-        answerEl.textContent = "Waiting for the new question…";
+        hideNextQuestionCountdown();
+        answerEl.textContent = "New question detected…";
         answerEl.className = "answer empty";
         candidate = current;
         stableCount = 0;
         meterBar.style.width = "20%";
-        setStatus("Question changed", "Waiting for the changed text/number/options to become stable…");
+        setStatus("Question changed", "Confirming the new question before capture…");
       }
 
       if (changed) {
-        // Compare candidate and current: the new frame must stop moving before
-        // we send it. This prevents camera shake from producing requests.
         const candidateDiff = candidate ? meanDifference(candidate, current) : 999;
+        const frameDiff = previous ? meanDifference(previous, current) : 0;
         if (candidateDiff < 1.55 && frameDiff < 1.7) stableCount++;
         else stableCount = 0;
 
@@ -415,17 +458,16 @@ function loop() {
           if (signature === previousAnalyzedSignature) {
             skippedCount++;
             updateStats();
-            setStatus("Same question skipped", "No AI request — waiting for the next meaningful text change.");
+            setStatus("Same question skipped", "Still watching for the next question change.");
           } else if (!busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
+            watchState = "ANALYZING_NEXT";
             analyzeCapturedFrame(capture, false, signature);
           } else {
-            // Never lose a question just because the previous AI request is
-            // still running. Keep the newest stable frame and analyze it as
-            // soon as the current request finishes.
             pendingCapture = capture;
             pendingSignature = signature;
             pendingQuestionVersion++;
-            setStatus("Question queued", "Previous answer is still processing; the newest question will be analyzed next.");
+            watchState = "QUEUED";
+            setStatus("Question queued", "Waiting for the current AI request to finish.");
           }
         }
       }
@@ -611,70 +653,6 @@ function captureCurrentFrame() {
   return { dataUrl, imageBase64: dataUrl.split(",")[1] };
 }
 
-
-function formatDiagnostics(items = []) {
-  return items.map((d, i) => {
-    const lines = [
-      `${i + 1}. ${d.provider} / ${d.model}`,
-      `HTTP: ${d.httpStatus ?? "?"}   elapsed: ${d.elapsedMs ?? "?"} ms`,
-      `message: ${d.errorMessage || "OK"}`
-    ];
-    if (d.errorType) lines.push(`type: ${d.errorType}`);
-    if (d.errorStatus) lines.push(`status: ${d.errorStatus}`);
-    if (d.errorCode) lines.push(`code: ${d.errorCode}`);
-    if (d.retryAfter) lines.push(`retry-after: ${d.retryAfter}`);
-    if (d.remainingRequests) lines.push(`remaining requests/day: ${d.remainingRequests}`);
-    if (d.remainingTokens) lines.push(`remaining tokens/min: ${d.remainingTokens}`);
-    if (d.resetTokens) lines.push(`token reset: ${d.resetTokens}`);
-    if (d.blockReason) lines.push(`block reason: ${d.blockReason}`);
-    return lines.join("\n");
-  }).join("\n\n");
-}
-
-function showDiagnostics(items, ok) {
-  diagnosticOutput.textContent = formatDiagnostics(items);
-  diagnosticOutput.className = `diagnostic-output ${ok ? "ok" : "bad"}`;
-}
-
-async function runAIDiagnostic() {
-  if (!stream || busy) return;
-  diagnosticBtn.disabled = true;
-  setBadge("TESTING AI", "busy");
-  setStatus("AI diagnostic", "Sending the current camera frame directly to Groq, then Gemini if needed…");
-  diagnosticOutput.textContent = "Running provider test…";
-  diagnosticOutput.className = "diagnostic-output";
-  try {
-    const capture = captureCurrentFrame();
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 45000);
-    let response;
-    try {
-      response = await fetch("/api/diagnose", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64: capture.imageBase64, mimeType: "image/jpeg" }),
-        signal: controller.signal
-      });
-    } finally { clearTimeout(timeout); }
-    const data = await response.json().catch(() => ({}));
-    showDiagnostics(data.diagnostics || [], Boolean(data.ok));
-    if (data.ok) {
-      setBadge("DIAGNOSTIC OK", "live");
-      setStatus("AI diagnostic complete", data.summary || "Provider test succeeded.");
-    } else {
-      setBadge("DIAGNOSTIC FAILED", "busy");
-      setStatus("AI diagnostic failed", data.summary || "Both providers failed.");
-    }
-  } catch (err) {
-    diagnosticOutput.textContent = err?.name === "AbortError" ? "Diagnostic request timed out after 45 seconds." : (err?.message || String(err));
-    diagnosticOutput.className = "diagnostic-output bad";
-    setBadge("DIAGNOSTIC FAILED", "busy");
-    setStatus("AI diagnostic failed", "See the diagnostic box for the exact failure.");
-  } finally {
-    diagnosticBtn.disabled = !stream;
-  }
-}
-
 async function analyzeCurrentFrame(manual, signature = null) {
   if (!stream || busy) return;
   if (!manual && Date.now() - lastAnalysis < cfg.intervalMs) return;
@@ -717,8 +695,7 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
     }
 
     const data = await response.json();
-    if (!response.ok) { const e = new Error(data.error || `HTTP ${response.status}`); e.diagnostics = data.diagnostics || []; throw e; }
-    if (data.diagnostics) showDiagnostics(data.diagnostics, true);
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
 
     let answerText = String(data.answer || "");
     let parsed = parseAnswer(answerText);
@@ -765,13 +742,15 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
     updateStats();
 
     setBadge("ANSWER READY", "live");
-    setStatus("Answer ready", "Popup shown. Watching for the next meaningful question/text change.");
     meterBar.style.width = "0%";
+    // Freeze the answered question as the reference. The 7-second handoff
+    // gives the user time to switch screens/questions before detection starts.
+    const answeredReference = baseline ? new Uint8ClampedArray(baseline) : (previous ? new Uint8ClampedArray(previous) : null);
+    startNextQuestionCountdown(answeredReference);
   } catch (err) {
     setBadge("ERROR", "busy");
-    if (err?.diagnostics) showDiagnostics(err.diagnostics, false);
     const message = err?.name === "AbortError"
-      ? "AI timed out. See the diagnostic box for provider details."
+      ? "AI timed out. Waiting for the next question."
       : (err.message || "Try again.");
     setStatus("Analysis failed", message);
   } finally {
@@ -788,7 +767,10 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
       answerEl.textContent = "Analyzing the latest question…";
       answerEl.className = "answer empty";
       setTimeout(() => {
-        if (stream && !busy) analyzeCapturedFrame(nextCapture, false, nextSignature);
+        if (stream && !busy) {
+          watchState = "ANALYZING_NEXT";
+          analyzeCapturedFrame(nextCapture, false, nextSignature);
+        }
       }, 120);
     }
   }
