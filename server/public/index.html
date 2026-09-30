@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <title>FrameSolve AI</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div>
+        <h1>FrameSolve AI</h1>
+        <p>Live camera practice assistant</p>
+      </div>
+      <span id="stateBadge" class="badge idle">READY</span>
+    </header>
+
+    <section class="camera-card">
+      <div class="video-wrap">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="compareCanvas" hidden></canvas>
+        <div id="cameraPlaceholder" class="placeholder">
+          <strong>Camera is off</strong>
+          <span>Tap Start Camera to begin.</span>
+        </div>
+        <div id="scanLine" class="scan-line hidden"></div>
+      </div>
+
+      <div class="controls">
+        <button id="startBtn" class="primary">Start Camera</button>
+        <button id="stopBtn" class="secondary" disabled>Stop</button>
+        <button id="captureBtn" class="secondary" disabled>Analyze Now</button>
+      </div>
+    </section>
+
+    <section class="status-card">
+      <div class="status-row">
+        <span>Status</span>
+        <strong id="status">Ready</strong>
+      </div>
+      <div class="stats">
+        <div><span>AI calls</span><strong id="apiCount">0</strong></div>
+        <div><span>Skipped</span><strong id="skippedCount">0</strong></div>
+      </div>
+      <div class="meter"><div id="meterBar"></div></div>
+      <p id="statusDetail">The app waits for a meaningful visual change before sending a frame.</p>
+    </section>
+
+    <section class="answer-card">
+      <div class="answer-head">
+        <h2>AI Answer</h2>
+        <div class="answer-actions"><button id="resetBtn">Reset counters</button><button id="clearBtn">Clear</button></div>
+      </div>
+      <div id="answer" class="answer empty">No answer yet.</div>
+    </section>
+
+    <details class="settings">
+      <summary>Detection settings</summary>
+      <label>
+        Sensitivity
+        <input id="threshold" type="range" min="5" max="40" step="1" value="18">
+        <span id="thresholdValue">18</span>
+      </label>
+      <label>
+        Stable frames
+        <input id="stableFrames" type="range" min="1" max="8" step="1" value="3">
+        <span id="stableFramesValue">3</span>
+      </label>
+      <label>
+        Minimum AI interval (seconds)
+        <input id="interval" type="range" min="2" max="20" step="0.5" value="3.5">
+        <span id="intervalValue">5</span>
+      </label>
+    </details>
+
+    <footer>
+      Use only with your own non-proctored practice/mock material.
+    </footer>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
