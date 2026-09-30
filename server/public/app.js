@@ -9,6 +9,7 @@ const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
 const popupCloseBtn = document.getElementById("popupCloseBtn");
 const popupCopyBtn = document.getElementById("popupCopyBtn");
+const historyList = document.getElementById("historyList");
 const copyHistoryBtn = document.getElementById("copyHistoryBtn");
 const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 
@@ -16,6 +17,7 @@ const statusEl = document.getElementById("status");
 const detailEl = document.getElementById("statusDetail");
 const answerEl = document.getElementById("answer");
 const popupAnswerEl = document.getElementById("popupAnswer");
+const popupExplanationEl = document.getElementById("popupExplanation");
 const popup = document.getElementById("answerPopup");
 const badge = document.getElementById("stateBadge");
 const meterBar = document.getElementById("meterBar");
@@ -49,13 +51,7 @@ let currentPopupText = "";
 let pendingCapture = null;
 let pendingSignature = null;
 let pendingQuestionVersion = 0;
-let autoRetryUsedForVersion = -1;
 let analysisVersion = 0;
-let latestQuestionVersion = 0;
-let motionReacquire = false;
-let motionStableCount = 0;
-let settleStartedAt = 0;
-let settleLastChangeAt = 0;
 let history = loadHistory();
 
 const DETECT_W = 192;
@@ -94,7 +90,26 @@ function saveHistory() {
 }
 
 function renderHistory() {
-  if (copyHistoryBtn) copyHistoryBtn.disabled = !history.length;
+  if (!history.length) {
+    historyList.innerHTML = '<div class="history-empty">Previous questions and answers will appear here.</div>';
+    copyHistoryBtn.disabled = true;
+    return;
+  }
+  copyHistoryBtn.disabled = false;
+  historyList.innerHTML = history.map((item, index) => {
+    const options = Array.isArray(item.options) ? item.options : [];
+    const optionsHtml = options.length
+      ? `<div class="history-options"><div class="history-label">Options</div>${options.map((opt, i) => `<div class="history-option"><span>${String.fromCharCode(65+i)}.</span> ${escapeHtml(opt)}</div>`).join('')}</div>`
+      : '';
+    return `<article class="history-item">
+      <div class="history-meta"><span>Q${escapeHtml(item.number || index + 1)} · ${escapeHtml(item.type || "OTHER")}</span><time>${escapeHtml(item.time || "")}</time></div>
+      <div class="history-label">Question</div>
+      <div class="history-question">${escapeHtml(item.question || "Detected question")}</div>
+      ${optionsHtml}
+      <div class="history-label">Solution</div>
+      <div class="history-answer">${escapeHtml(item.answer || "")}</div>
+    </article>`;
+  }).join("");
 }
 
 function buildAllHistoryCopyText() {
@@ -160,6 +175,8 @@ function showPopup(answerText) {
   const parsed = parseAnswer(answerText);
   currentPopupText = parsed.answer || answerText.trim() || "No answer";
   popupAnswerEl.textContent = parsed.answer || answerText.trim() || "No answer";
+  popupExplanationEl.textContent = parsed.explanation || "";
+  popupExplanationEl.classList.toggle("hidden", !parsed.explanation);
   popup.classList.remove("show");
   requestAnimationFrame(() => popup.classList.add("show"));
 
@@ -268,9 +285,6 @@ async function startCamera() {
     previousAnalyzedSignature = null;
     pendingCapture = null;
     pendingSignature = null;
-    latestQuestionVersion = 0;
-    motionReacquire = false;
-    motionStableCount = 0;
 
     startBtn.disabled = true;
     stopBtn.disabled = false;
@@ -283,10 +297,6 @@ async function startCamera() {
     setStatus("Watching", "Local detector is watching only the question/options area. No AI request yet.");
     loop();
   } catch (err) {
-    if (questionVersionAtStart !== latestQuestionVersion && !manual) {
-      setStatus("New question ready", "Previous request ended late; the newer question remains queued.");
-      return;
-    }
     setBadge("ERROR", "busy");
     setStatus("Camera unavailable", err.message || "Allow camera permission and try again.");
   }
@@ -313,11 +323,6 @@ function stopCamera() {
   startupStableCount = 0;
   pendingCapture = null;
   pendingSignature = null;
-  latestQuestionVersion++;
-  motionReacquire = false;
-  motionStableCount = 0;
-  settleStartedAt = 0;
-  settleLastChangeAt = 0;
   hidePopup();
   setBadge("READY", "idle");
   setStatus("Stopped", "Camera monitoring is off.");
@@ -370,40 +375,7 @@ function loop() {
 
       const meaningfulChange = tinyTextChange || normalQuestionChange;
 
-      // If the phone was moved, the whole frame can change and the normal
-      // localized detector intentionally ignores that broad motion. After the
-      // camera settles, compare the new stable frame with the last analyzed
-      // frame. If the scene/question is actually different, treat it as a
-      // new question. This prevents the old answer from surviving a phone move.
-      const broadMotion = frameDiff >= 5.5 || aligned.residualMean >= 5.5;
-      if (broadMotion && !changed) {
-        motionReacquire = true;
-        motionStableCount = 0;
-      }
-      if (motionReacquire && !changed) {
-        if (frameDiff < 1.55 && aligned.residualMean < 2.2) motionStableCount++;
-        else motionStableCount = 0;
-        if (motionStableCount >= 6) {
-          const settledDifference = aligned.residualMean;
-          const settledSignature = visualSignature(current);
-          motionReacquire = false;
-          motionStableCount = 0;
-          if (settledDifference >= 2.0 && settledSignature !== previousAnalyzedSignature) {
-            changed = true;
-            latestQuestionVersion++;
-            hidePopup();
-            answerEl.textContent = "New question detected…";
-            answerEl.className = "answer empty";
-            candidate = current;
-            stableCount = 0;
-            meterBar.style.width = "20%";
-            setStatus("Question changed", "Phone moved and settled — checking the new question before sending it.");
-          }
-        }
-      }
-
       if (!changed && meaningfulChange) {
-        latestQuestionVersion++;
         changed = true;
         // A genuinely new question has appeared. Never leave the previous
         // answer visible while the new question is being analyzed.
@@ -417,43 +389,21 @@ function loop() {
       }
 
       if (changed) {
-        // IMPORTANT: once a meaningful question change is detected, do not
-        // require perfectly identical frames. Phone-camera screens naturally
-        // have tiny brightness/pixel fluctuations, which previously caused
-        // the automatic pipeline to remain stuck on "waiting for stability".
-        // We now use a short settle window with a hard maximum.
-        if (!settleStartedAt) {
-          settleStartedAt = Date.now();
-          settleLastChangeAt = Date.now();
-        }
-
+        // Compare candidate and current: the new frame must stop moving before
+        // we send it. This prevents camera shake from producing requests.
         const candidateDiff = candidate ? meanDifference(candidate, current) : 999;
-        if (candidateDiff >= 1.7 || frameDiff >= 2.0) {
-          settleLastChangeAt = Date.now();
-          stableCount = 0;
-        } else {
-          stableCount++;
-        }
+        if (candidateDiff < 1.55 && frameDiff < 1.7) stableCount++;
+        else stableCount = 0;
+
         candidate = current;
+        meterBar.style.width = `${Math.min(100, (stableCount / cfg.stableFrames) * 100)}%`;
 
-        const quietFor = Date.now() - settleLastChangeAt;
-        const totalSettle = Date.now() - settleStartedAt;
-        const enoughQuiet = quietFor >= 450;
-        const hardSettle = totalSettle >= 1400;
-        const enoughFrames = stableCount >= 2;
-        meterBar.style.width = `${Math.min(100, Math.max(5, (quietFor / 700) * 100))}%`;
-
-        // Capture automatically as soon as the frame is reasonably settled,
-        // or at 1.4s latest. This removes the gap where the UI detected the
-        // question but never dispatched an automatic request.
-        if ((enoughQuiet && enoughFrames) || hardSettle) {
+        if (stableCount >= cfg.stableFrames) {
           const signature = visualSignature(current);
           const capture = captureCurrentFrame();
           changed = false;
           stableCount = 0;
           candidate = null;
-          settleStartedAt = 0;
-          settleLastChangeAt = 0;
           baseline = current;
           meterBar.style.width = "0%";
 
@@ -461,21 +411,16 @@ function loop() {
             skippedCount++;
             updateStats();
             setStatus("Same question skipped", "No AI request — waiting for the next meaningful text change.");
+          } else if (!busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
+            analyzeCapturedFrame(capture, false, signature);
           } else {
-            // Always queue a detected question if another request is busy.
-            // The newest stable frame is preserved and dispatched when the
-            // current request finishes.
+            // Never lose a question just because the previous AI request is
+            // still running. Keep the newest stable frame and analyze it as
+            // soon as the current request finishes.
             pendingCapture = capture;
             pendingSignature = signature;
-            if (!busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
-              const nextCapture = pendingCapture;
-              const nextSignature = pendingSignature;
-              pendingCapture = null;
-              pendingSignature = null;
-              analyzeCapturedFrame(nextCapture, false, nextSignature);
-            } else {
-              setStatus("Question queued", "New question captured automatically; it will be analyzed as soon as the current request finishes.");
-            }
+            pendingQuestionVersion++;
+            setStatus("Question queued", "Previous answer is still processing; the newest question will be analyzed next.");
           }
         }
       }
@@ -668,7 +613,6 @@ async function analyzeCurrentFrame(manual, signature = null) {
 }
 
 async function analyzeCapturedFrame(capture, manual, signature = null) {
-  const questionVersionAtStart = latestQuestionVersion;
   if (!stream) return;
   if (!manual && busy) {
     pendingCapture = capture;
@@ -683,20 +627,14 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
 
   busy = true;
   const thisAnalysisVersion = ++analysisVersion;
-  apiCount++;
-  updateStats();
   lastAnalysis = Date.now();
   setBadge("ANALYZING", "busy");
-  setStatus("Analyzing", "Reading the captured question carefully…");
+  setStatus("Analyzing", "Reading the exact captured question…");
 
   try {
     const imageBase64 = capture.imageBase64;
     const controller = new AbortController();
-    // The server owns a strict 40-second AI budget. Keep a tiny network/UI
-    // buffer here so the browser does not abort a response that finished at
-    // the deadline.
-    const clientTimeoutMs = 43000;
-    const timeout = setTimeout(() => controller.abort(), clientTimeoutMs);
+    const timeout = setTimeout(() => controller.abort(), 90000);
     let response;
     try {
       response = await fetch("/api/analyze", {
@@ -709,50 +647,67 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
       clearTimeout(timeout);
     }
 
-    const data = await response.json().catch(() => ({}));
+    const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
 
-    // Never let a late response for an older question overwrite a newer one.
-    if (!manual && questionVersionAtStart !== latestQuestionVersion) {
-      setStatus("New question ready", "Discarded the older response; the newest captured question remains queued.");
-      return;
+    let answerText = String(data.answer || "");
+    let parsed = parseAnswer(answerText);
+    const unreadable = /unable to read|cannot read|can't read|unreadable|not readable|image is too blurry|text is too blurry/i.test(answerText);
+    const weakRead = !parsed.question || parsed.question.length < 8 || /detected question/i.test(parsed.question);
+
+    if ((unreadable || weakRead || parsed.type === "CODING") && data.provider === "Groq") {
+      setStatus(
+        parsed.type === "CODING" ? "Verifying code" : "Reading again",
+        parsed.type === "CODING"
+          ? "Coding question detected — allowing the longer verification pass…"
+          : "Groq could not confidently read the frame; trying Gemini…"
+      );
+      const retryController = new AbortController();
+      const retryTimeout = setTimeout(() => retryController.abort(), parsed.type === "CODING" ? 60000 : 10000);
+      let retryResponse;
+      try {
+        retryResponse = await fetch("/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ imageBase64, mimeType: "image/jpeg", forceFallback: true, mode: parsed.type === "CODING" ? "CODING" : "NORMAL" }),
+          signal: retryController.signal
+        });
+      } finally {
+        clearTimeout(retryTimeout);
+      }
+      const retryData = await retryResponse.json();
+      if (retryResponse.ok && retryData.answer) {
+        data.answer = retryData.answer;
+        data.provider = retryData.provider || "Gemini fallback";
+        answerText = String(data.answer);
+        parsed = parseAnswer(answerText);
+      }
     }
 
-    const answerText = String(data.answer || "");
-    const parsed = parseAnswer(answerText);
-    const answerForDisplay = parsed.answer || answerText;
-
+    const answerForDisplay = parsed.answer || data.answer;
     answerEl.textContent = answerForDisplay;
     answerEl.className = "answer";
-    showPopup(answerForDisplay);
+    showPopup(data.answer);
     addHistory(answerForDisplay, parsed.type, parsed.question || "Detected question", parsed.options, parsed.explanation);
 
+    apiCount++;
     previousAnalyzedSignature = signature || null;
     updateStats();
 
     setBadge("ANSWER READY", "live");
-    setStatus("Answer ready", `Verified through ${data.provider || "AI"}. Watching for the next meaningful question/text change.`);
+    setStatus("Answer ready", "Popup shown. Watching for the next meaningful question/text change.");
     meterBar.style.width = "0%";
   } catch (err) {
-    // A new question may have appeared while the previous one was processing.
-    // Do not surface a stale error over the new question; queue processing is
-    // handled in finally below.
-    if (!manual && questionVersionAtStart !== latestQuestionVersion) {
-      setStatus("New question ready", "The previous request ended late; the newer question is being processed.");
-      return;
-    }
-
-    hidePopup();
     setBadge("ERROR", "busy");
     const message = err?.name === "AbortError"
-      ? "AI request reached the response limit without a reliable answer."
+      ? "AI timed out. Waiting for the next question."
       : (err.message || "Try again.");
     setStatus("Analysis failed", message);
   } finally {
     busy = false;
 
-    // Immediately process the newest stable question. Do not leave the UI
-    // waiting for a manual Analyze Now click.
+    // If a newer question arrived while this request was running, immediately
+    // process the newest stable capture instead of leaving the old answer on screen.
     if (pendingCapture && pendingSignature && pendingSignature !== previousAnalyzedSignature && stream) {
       const nextCapture = pendingCapture;
       const nextSignature = pendingSignature;
@@ -763,7 +718,7 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
       answerEl.className = "answer empty";
       setTimeout(() => {
         if (stream && !busy) analyzeCapturedFrame(nextCapture, false, nextSignature);
-      }, 50);
+      }, 120);
     }
   }
 }

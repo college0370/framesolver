@@ -24,6 +24,7 @@
           <button id="popupCloseBtn" class="popup-close" aria-label="Close answer">×</button>
           <div class="popup-label">AI ANSWER</div>
           <div id="popupAnswer" class="popup-answer">—</div>
+          <div id="popupExplanation" class="popup-explanation"></div>
           <button id="popupCopyBtn" class="popup-copy">Copy answer</button>
         </div>
         <canvas id="compareCanvas" hidden></canvas>
@@ -54,23 +55,25 @@
       <p id="statusDetail">The phone detects character/text/number changes locally. A new question is queued even if the previous answer is still processing, and the exact captured frame is analyzed. MCQ/English target ≤25s, numerical ≤40s, coding gets a longer verification window. Groq is primary; Gemini is fallback.</p>
     </section>
 
+    <section class="history-card">
+      <div class="answer-head">
+        <h2>History</h2>
+        <button id="clearHistoryBtn">Clear history</button>
+      </div>
+      <div id="historyList" class="history-list">
+        <div class="history-empty">Previous questions and answers will appear here.</div>
+      </div>
+      <div class="history-copy-all-wrap">
+        <button id="copyHistoryBtn" class="history-copy-all">Copy all history</button>
+      </div>
+    </section>
+
     <section class="answer-card">
       <div class="answer-head">
         <h2>AI Answer</h2>
         <div class="answer-actions"><button id="resetBtn">Reset counters</button><button id="clearBtn">Clear</button></div>
       </div>
       <div id="answer" class="answer empty">No answer yet.</div>
-    </section>
-
-    <section class="history-card history-controls-card">
-      <div class="answer-head">
-        <h2>History</h2>
-      </div>
-      <div class="history-controls">
-        <button id="copyHistoryBtn" class="history-copy-all">Copy all history</button>
-        <button id="clearHistoryBtn" class="history-clear">Clear history</button>
-      </div>
-      <p class="history-hint">Questions and solutions are saved privately on this device. Use Copy all history to copy them as one block.</p>
     </section>
 
     <details class="settings">

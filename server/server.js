@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "6.9.0",
+    version: "5.9.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -112,7 +112,7 @@ async function callGroq(imageBase64, mimeType) {
   return answer;
 }
 
-async function callGemini(imageBase64, mimeType, mode = "NORMAL", timeoutMs = null) {
+async function callGemini(imageBase64, mimeType, mode = "NORMAL") {
   if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
   const response = await fetchWithTimeout(
@@ -135,7 +135,7 @@ async function callGemini(imageBase64, mimeType, mode = "NORMAL", timeoutMs = nu
         }
       })
     },
-    timeoutMs || (mode === "CODING" ? 60000 : 11000)
+    mode === "CODING" ? 60000 : 9000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);
@@ -148,112 +148,44 @@ async function callGemini(imageBase64, mimeType, mode = "NORMAL", timeoutMs = nu
 }
 
 app.post("/api/analyze", async (req, res) => {
-  const { imageBase64, mimeType = "image/jpeg", mode = "AUTO" } = req.body || {};
+  const { imageBase64, mimeType = "image/jpeg", forceFallback = false, mode = "NORMAL" } = req.body || {};
   if (!imageBase64) return res.status(400).json({ error: "imageBase64 is required" });
 
-  // One captured question gets one strict 40-second AI window.
-  // Pass 1: fast Groq visual/OCR answer (max 14s).
-  // If Groq fails, times out, or returns an unreadable answer, retry the
-  // SAME captured frame with Gemini using the remaining time (up to 25s).
   const started = Date.now();
-  const TOTAL_BUDGET_MS = 40000;
-  const GEMINI_MAX_MS = 25000;
-
-  let groqAnswer = "";
   let groqError = "";
-  let groqTimedOut = false;
-
-  try {
-    groqAnswer = await callGroq(imageBase64, mimeType);
-  } catch (error) {
-    groqError = error?.message || "Groq failed";
-    groqTimedOut = /abort|timeout|timed out/i.test(groqError);
-  }
-
-  const groqParsed = groqAnswer ? parseStructuredAnswer(groqAnswer) : null;
-  const groqReadable = !!(
-    groqAnswer &&
-    !looksUnreadable(groqAnswer) &&
-    groqParsed?.question &&
-    groqParsed?.answer
-  );
-
-  if (groqReadable) {
-    return res.json({
-      answer: groqAnswer,
-      provider: "Groq",
-      model: groqModel,
-      elapsedMs: Date.now() - started,
-      groqAttempts: 1
-    });
-  }
-
-  // Automatic retry/fallback: same image, no new capture required.
-  const remaining = Math.min(
-    GEMINI_MAX_MS,
-    Math.max(0, TOTAL_BUDGET_MS - (Date.now() - started) - 250)
-  );
-
-  let geminiError = "";
-  if (remaining >= 2000) {
+  if (!forceFallback) {
     try {
-      const answer = await callGemini(
-        imageBase64,
-        mimeType,
-        "NORMAL",
-        remaining
-      );
-
-      return res.json({
-        answer,
-        provider: "Gemini fallback",
-        model: geminiModel,
-        elapsedMs: Date.now() - started,
-        groqAttempts: 1,
-        groqTimedOut
-      });
+      const answer = await callGroq(imageBase64, mimeType);
+      return res.json({ answer, provider: "Groq", model: groqModel, elapsedMs: Date.now() - started });
     } catch (error) {
-      geminiError = error?.message || "Gemini failed";
+      groqError = error?.message || "Groq failed";
+      console.warn("Groq failed; trying Gemini fallback:", groqError);
     }
   } else {
-    geminiError = "Not enough time remained for Gemini";
+    groqError = "Groq unreadable response; forced Gemini fallback";
   }
 
-  // If Groq produced text but it was not structured enough for our parser,
-  // return it as a last-resort answer instead of throwing it away.
-  if (groqAnswer) {
+  try {
+    const answer = await callGemini(imageBase64, mimeType, mode);
     return res.json({
-      answer: groqAnswer,
-      provider: "Groq last-resort",
-      model: groqModel,
-      elapsedMs: Date.now() - started,
-      groqAttempts: 1,
-      groqTimedOut
+      answer,
+      provider: "Gemini fallback",
+      model: geminiModel,
+      elapsedMs: Date.now() - started
+    });
+  } catch (error) {
+    const geminiError = error?.message || "Gemini fallback failed";
+    console.error("Both AI providers failed", { groqError, geminiError });
+    return res.status(503).json({
+      error: mode === "CODING"
+        ? "Coding analysis could not finish within the allowed verification window."
+        : "Analysis could not finish within the normal response window.",
+      groq: groqError,
+      gemini: geminiError,
+      elapsedMs: Date.now() - started
     });
   }
-
-  return res.status(503).json({
-    error: "Both AI attempts failed within the 40-second window.",
-    groq: groqError || "Groq returned an unreadable answer",
-    gemini: geminiError,
-    groqTimedOut,
-    elapsedMs: Date.now() - started,
-    groqAttempts: 1
-  });
 });
-
-function parseStructuredAnswer(text) {
-  const normalized = String(text || "").replace(/\r/g, "");
-  const questionMatch = normalized.match(/(?:\*\*)?QUESTION(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?OPTIONS(?:\*\*)?\s*:|\n\s*(?:\*\*)?ANSWER(?:\*\*)?\s*:|$)/i);
-  const answerMatch = normalized.match(/(?:\*\*)?ANSWER(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?EXPLANATION(?:\*\*)?\s*:|$)/i);
-  return { question: questionMatch?.[1]?.trim() || "", answer: answerMatch?.[1]?.trim() || "" };
-}
-function normalizeAnswer(text) {
-  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
-}
-function looksUnreadable(text) {
-  return /unable to read|cannot read|can't read|unreadable|not readable|too blurry|could not recover/i.test(String(text || ""));
-}
 
 app.get("*", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
