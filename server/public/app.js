@@ -48,9 +48,9 @@ const DETECT_W = 160;
 const DETECT_H = 120;
 
 const cfg = {
-  threshold: 4.8,
-  stableFrames: 3,
-  intervalMs: 1500
+  threshold: 2.2,
+  stableFrames: 2,
+  intervalMs: 1200
 };
 
 function setStatus(text, detail = "") {
@@ -226,18 +226,24 @@ function loop() {
 
       // Localized text/number changes are the primary trigger. Broad changes
       // across most blocks are treated as camera shake and ignored.
-      const localizedTextChange =
-        metrics.mean >= cfg.threshold &&
-        metrics.changedRatio >= 0.004 &&
-        metrics.changedBlocks >= 2 &&
-        metrics.changedBlocks <= 70;
+      // Very small localized edits (a digit, character, punctuation mark,
+      // or one word) can be only a few dozen pixels at detection resolution.
+      // We therefore use an aligned residual metric rather than requiring a
+      // large percentage of the whole screen to change.
+      const aligned = alignedChangeMetrics(baseline, current);
+      const tinyTextChange =
+        aligned.residualMean >= cfg.threshold &&
+        aligned.changedRatio >= 0.00055 &&
+        aligned.changedBlocks >= 1 &&
+        aligned.changedBlocks <= 45;
 
-      const moderateQuestionChange =
-        metrics.changedRatio >= 0.012 &&
-        metrics.changedBlocks >= 3 &&
-        metrics.changedBlocks <= 95;
+      const normalQuestionChange =
+        aligned.residualMean >= Math.max(1.4, cfg.threshold * 0.72) &&
+        aligned.changedRatio >= 0.0012 &&
+        aligned.changedBlocks >= 2 &&
+        aligned.changedBlocks <= 90;
 
-      const meaningfulChange = localizedTextChange || moderateQuestionChange;
+      const meaningfulChange = tinyTextChange || normalQuestionChange;
 
       if (!changed && meaningfulChange) {
         changed = true;
@@ -340,6 +346,65 @@ function changeMetrics(a, b) {
   };
 }
 
+function alignedChangeMetrics(a, b) {
+  // Find the tiny camera translation that best aligns the current frame to
+  // the last analyzed frame. This suppresses hand/table shake while preserving
+  // local changes such as one digit or one character changing.
+  let best = { score: Infinity, dx: 0, dy: 0 };
+  for (let dy = -3; dy <= 3; dy++) {
+    for (let dx = -3; dx <= 3; dx++) {
+      let total = 0;
+      let count = 0;
+      for (let y = 14; y <= 88; y += 3) {
+        for (let x = 12; x <= 148; x += 3) {
+          const xx = x + dx;
+          const yy = y + dy;
+          if (xx < 8 || xx > 152 || yy < 10 || yy > 92) continue;
+          total += Math.abs(grayAt(a, x, y) - grayAt(b, xx, yy));
+          count++;
+        }
+      }
+      const score = count ? total / count : Infinity;
+      if (score < best.score) best = { score, dx, dy };
+    }
+  }
+
+  let residualTotal = 0;
+  let residualCount = 0;
+  let changedPixels = 0;
+  let changedBlocks = 0;
+
+  for (let by = 10; by < 92; by += 5) {
+    for (let bx = 8; bx < 153; bx += 5) {
+      let block = 0;
+      let blockCount = 0;
+      for (let y = by; y < Math.min(by + 5, 93); y++) {
+        for (let x = bx; x < Math.min(bx + 5, 153); x++) {
+          if (!inQuestionRegion(x, y)) continue;
+          const xx = x + best.dx;
+          const yy = y + best.dy;
+          if (xx < 8 || xx > 152 || yy < 10 || yy > 92) continue;
+          const d = Math.abs(grayAt(a, x, y) - grayAt(b, xx, yy));
+          residualTotal += d;
+          residualCount++;
+          block += d;
+          blockCount++;
+          if (d >= 12) changedPixels++;
+        }
+      }
+      if (blockCount && block / blockCount >= 3.0) changedBlocks++;
+    }
+  }
+
+  return {
+    residualMean: residualCount ? residualTotal / residualCount : 0,
+    changedRatio: residualCount ? changedPixels / residualCount : 0,
+    changedBlocks,
+    dx: best.dx,
+    dy: best.dy
+  };
+}
+
 function visualSignature(data) {
   let signature = "";
   for (let y = 10; y <= 92; y += 5) {
@@ -363,14 +428,14 @@ async function analyzeCurrentFrame(manual, signature = null) {
     const capture = document.createElement("canvas");
     // 960px is enough for typical phone-camera question text while keeping
     // upload size and vision latency down.
-    const maxWidth = 900;
+    const maxWidth = 1280;
     const scale = Math.min(1, maxWidth / video.videoWidth);
     capture.width = Math.round(video.videoWidth * scale);
     capture.height = Math.round(video.videoHeight * scale);
 
     const c = capture.getContext("2d");
     c.drawImage(video, 0, 0, capture.width, capture.height);
-    const dataUrl = capture.toDataURL("image/jpeg", 0.58);
+    const dataUrl = capture.toDataURL("image/jpeg", 0.82);
     const imageBase64 = dataUrl.split(",")[1];
 
     const controller = new AbortController();
@@ -389,6 +454,30 @@ async function analyzeCurrentFrame(manual, signature = null) {
 
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+
+    const answerText = String(data.answer || "");
+    const unreadable = /unable to read|cannot read|can't read|unreadable|not readable/i.test(answerText);
+    if (unreadable && data.provider === "Groq") {
+      setStatus("Reading again", "Groq could not confidently read the code; requesting the higher-quality fallback image analysis…");
+      const retryController = new AbortController();
+      const retryTimeout = setTimeout(() => retryController.abort(), 12000);
+      let retryResponse;
+      try {
+        retryResponse = await fetch("/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ imageBase64, mimeType: "image/jpeg", forceFallback: true }),
+          signal: retryController.signal
+        });
+      } finally {
+        clearTimeout(retryTimeout);
+      }
+      const retryData = await retryResponse.json();
+      if (retryResponse.ok && retryData.answer) {
+        data.answer = retryData.answer;
+        data.provider = retryData.provider || "Gemini fallback";
+      }
+    }
 
     answerEl.textContent = data.answer;
     answerEl.className = "answer";

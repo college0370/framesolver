@@ -11,7 +11,8 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = Number(process.env.PORT || 8080);
-const model = process.env.GROQ_MODEL || "qwen/qwen3.8-27b";
+const groqModel = process.env.GROQ_MODEL || "qwen/qwen3.8-27b";
+const geminiModel = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
 app.use(cors());
 app.use(express.json({ limit: "8mb" }));
@@ -21,103 +22,158 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "5.1.0",
-    provider: "Groq",
-    model
+    version: "5.3.0",
+    primary: { provider: "Groq", model: groqModel },
+    fallback: { provider: "Gemini", model: geminiModel }
   });
 });
 
-app.post("/api/analyze", async (req, res) => {
-  try {
-    const { imageBase64, mimeType = "image/jpeg" } = req.body || {};
+const prompt = `
+You are a fast visual question-answering assistant for the user's own non-proctored practice/mock material.
 
-    if (!imageBase64) {
-      return res.status(400).json({ error: "imageBase64 is required" });
-    }
+IMPORTANT: This image may contain a PROGRAMMING QUESTION or CODE shown on a phone/laptop screen.
+Read the image carefully before deciding that text is unreadable.
 
-    if (!process.env.GROQ_API_KEY) {
-      return res.status(500).json({ error: "GROQ_API_KEY is not configured" });
-    }
+For programming questions:
+1. First mentally transcribe the visible question, constraints, input/output format, and code/text.
+2. Preserve symbols such as (), {}, [], :, ;, <, >, =, ==, <=, >=, quotes, underscores, and indentation.
+3. Then solve the problem.
+4. If code is requested, return complete runnable Python 3 code, not pseudocode.
+5. If the question asks for the output of code, return the exact output.
 
-    const prompt = `
-Read the question visible in this image and answer it for the user's own non-proctored practice material.
-
-Return ONLY this compact format:
-ANSWER: <direct answer>
-EXPLANATION: <optional one short sentence>
+Return:
+ANSWER: <direct answer or complete code>
+EXPLANATION: <one short useful sentence>
 
 Rules:
-- MCQ: give the correct option text.
+- MCQ: give the correct option text and, if useful, its letter.
 - English/fill-in-the-blank: give the exact word or phrase.
-- Numerical/aptitude: give the final result.
-- Programming/CS: give the direct answer; include tiny code only if absolutely necessary.
-- If text is unreadable, say: ANSWER: Unable to read the question.
-- Do not discuss the image or your reasoning.
+- Numerical/aptitude: give the final result with the essential calculation only.
+- Python/programming: give the complete Python 3 solution when code is requested.
+- SQL/CS theory: give the direct correct answer.
+- Do NOT say the image is unreadable merely because the code is small. Inspect the entire image first.
+- If a small portion genuinely cannot be read, state the specific missing portion and solve using all readable information.
+- Only use 'Unable to read the question' when the main question itself truly cannot be recovered from the image.
 `;
 
-    const dataUrl = `data:${mimeType};base64,${imageBase64}`;
-    const endpoint = "https://api.groq.com/openai/v1/chat/completions";
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+function dataUrl(imageBase64, mimeType) {
+  return `data:${mimeType};base64,${imageBase64}`;
+}
 
-    let response;
+async function fetchWithTimeout(url, options, ms) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callGroq(imageBase64, mimeType) {
+  if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY is not configured");
+  const response = await fetchWithTimeout(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: groqModel,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: dataUrl(imageBase64, mimeType) } }
+          ]
+        }],
+        temperature: 0,
+        max_completion_tokens: 420,
+        reasoning_effort: "none",
+        stream: false
+      })
+    },
+    12000
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.error?.message || `Groq HTTP ${response.status}`);
+  const answer = data?.choices?.[0]?.message?.content?.trim();
+  if (!answer) throw new Error("Groq returned no answer");
+  return answer;
+}
+
+async function callGemini(imageBase64, mimeType) {
+  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
+  const response = await fetchWithTimeout(
+    endpoint,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          role: "user",
+          parts: [
+            { text: prompt },
+            { inline_data: { mime_type: mimeType, data: imageBase64 } }
+          ]
+        }],
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: 420,
+          thinkingConfig: { thinkingLevel: "low" }
+        }
+      })
+    },
+    12000
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);
+  const answer = (data?.candidates?.[0]?.content?.parts || [])
+    .map(part => part?.text || "")
+    .join("")
+    .trim();
+  if (!answer) throw new Error("Gemini returned no answer");
+  return answer;
+}
+
+app.post("/api/analyze", async (req, res) => {
+  const { imageBase64, mimeType = "image/jpeg", forceFallback = false } = req.body || {};
+  if (!imageBase64) return res.status(400).json({ error: "imageBase64 is required" });
+
+  const started = Date.now();
+  let groqError = "";
+  if (!forceFallback) {
     try {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.GROQ_API_KEY}`
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "text", text: prompt },
-              {
-                type: "image_url",
-                image_url: { url: dataUrl }
-              }
-            ]
-          }],
-          temperature: 0.1,
-          max_completion_tokens: 60,
-          reasoning_effort: "none",
-          stream: false
-        }),
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timeout);
+      const answer = await callGroq(imageBase64, mimeType);
+      return res.json({ answer, provider: "Groq", model: groqModel, elapsedMs: Date.now() - started });
+    } catch (error) {
+      groqError = error?.message || "Groq failed";
+      console.warn("Groq failed; trying Gemini fallback:", groqError);
     }
+  } else {
+    groqError = "Groq unreadable response; forced Gemini fallback";
+  }
 
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      const message = data?.error?.message || "Groq request failed";
-      return res.status(response.status).json({ error: message });
-    }
-
-    const answer = data?.choices?.[0]?.message?.content?.trim();
-
-    if (!answer) {
-      return res.status(502).json({ error: "Groq returned no answer" });
-    }
-
-    res.json({
+  try {
+    const answer = await callGemini(imageBase64, mimeType);
+    return res.json({
       answer,
-      model,
-      provider: "Groq",
-      timestamp: new Date().toISOString()
+      provider: "Gemini fallback",
+      model: geminiModel,
+      elapsedMs: Date.now() - started
     });
   } catch (error) {
-    console.error(error);
-    res.status(error?.name === "AbortError" ? 504 : 500).json({
-      error: error?.name === "AbortError"
-        ? "AI response timed out. Waiting for the next question."
-        : "Server error",
-      detail: error?.message || "unknown"
+    const geminiError = error?.message || "Gemini fallback failed";
+    console.error("Both AI providers failed", { groqError, geminiError });
+    return res.status(503).json({
+      error: "Both AI providers failed or timed out.",
+      groq: groqError,
+      gemini: geminiError,
+      elapsedMs: Date.now() - started
     });
   }
 });
@@ -127,5 +183,5 @@ app.get("*", (_req, res) => {
 });
 
 app.listen(port, "0.0.0.0", () => {
-  console.log(`FrameSolve Web running on port ${port} using ${model}`);
+  console.log(`FrameSolve Web running on port ${port} with Groq primary + Gemini fallback`);
 });

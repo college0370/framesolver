@@ -51,7 +51,7 @@
         <div><span>Skipped</span><strong id="skippedCount">0</strong></div>
       </div>
       <div class="meter"><div id="meterBar"></div></div>
-      <p id="statusDetail">The phone detects question/text changes locally. AI is called only after a stable change.</p>
+      <p id="statusDetail">The phone detects question/text/number changes locally. AI is called only after a stable meaningful change. Groq is primary; Gemini is fallback.</p>
     </section>
 
     <section class="answer-card">
@@ -66,17 +66,17 @@
       <summary>Detection settings</summary>
       <label>
         Sensitivity
-        <input id="threshold" type="range" min="3" max="40" step="0.5" value="4.8">
+        <input id="threshold" type="range" min="3" max="40" step="0.5" value="2.2">
         <span id="thresholdValue">4.8</span>
       </label>
       <label>
         Stable frames
-        <input id="stableFrames" type="range" min="1" max="8" step="1" value="3">
+        <input id="stableFrames" type="range" min="1" max="8" step="1" value="2">
         <span id="stableFramesValue">3</span>
       </label>
       <label>
         Minimum AI interval (seconds)
-        <input id="interval" type="range" min="1" max="20" step="0.5" value="1.5">
+        <input id="interval" type="range" min="1" max="20" step="0.5" value="1.2">
         <span id="intervalValue">1.5</span>
       </label>
     </details>
