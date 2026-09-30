@@ -1,10 +1,10 @@
-# FrameSolve AI v5 — Local Smart Detection + Groq Vision
+# FrameSolve AI v5.5 — Character Change Detection + Groq/Gemini
 
 Fast mobile-first practice assistant for the user's own non-proctored mock/practice material.
 
 ## Flow
 
-**Phone camera → local question/text change detection → stable changed frame → ONE Groq vision request → popup answer → keep watching**
+**Phone camera → local character/text/number change detection → stable changed frame → Groq vision → Gemini verification/fallback → popup answer → history**
 
 The browser does the continuous detection locally. It does **not** send camera frames continuously to the AI provider.
 
@@ -54,3 +54,15 @@ Use only with your own non-proctored practice/mock material.
 
 ### 30-second response target
 The v5.1 server uses a hard 20-second AI request timeout and the browser uses a 22-second request timeout. The app does not retry timed-out requests, so it will not wait minutes for a single answer.
+
+
+### v5.5 timing and detection
+- Detection resolution increased to 192×144 for smaller character/digit changes.
+- The detector aligns frames to suppress small camera/table movement while preserving localized text changes.
+- A meaningful character, digit, word, option, or question-number change triggers a new analysis after the frame stabilizes.
+- Same question is not repeatedly sent to AI.
+- Normal Groq request has a ~20s server cap; normal Gemini fallback is ~8s.
+- Coding results can receive a longer Gemini verification pass of up to ~60s after the fast Groq result.
+- Browser request timeout is 90s so the coding verification window is not cut off.
+- Capture uses up to 1280px JPEG at quality 0.88 for better code/text readability.
+- History stores the model-returned question text, answer, type, and time; Copy/View are available.

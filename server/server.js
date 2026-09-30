@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "5.4.0",
+    version: "5.5.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -43,6 +43,7 @@ For programming questions:
 
 Return exactly:
 TYPE: <MCQ | ENGLISH | NUMERICAL | CODING | OTHER>
+QUESTION: <short transcription of the question; include the important options/constraints when visible>
 ANSWER: <direct answer or complete code>
 EXPLANATION: <one short useful sentence>
 
@@ -92,12 +93,12 @@ async function callGroq(imageBase64, mimeType) {
           ]
         }],
         temperature: 0,
-        max_completion_tokens: 1200,
+        max_completion_tokens: 1800,
         reasoning_effort: "none",
         stream: false
       })
     },
-    12000
+    20000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Groq HTTP ${response.status}`);
@@ -106,7 +107,7 @@ async function callGroq(imageBase64, mimeType) {
   return answer;
 }
 
-async function callGemini(imageBase64, mimeType) {
+async function callGemini(imageBase64, mimeType, mode = "NORMAL") {
   if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
   const response = await fetchWithTimeout(
@@ -129,7 +130,7 @@ async function callGemini(imageBase64, mimeType) {
         }
       })
     },
-    12000
+    mode === "CODING" ? 60000 : 8000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);
@@ -142,7 +143,7 @@ async function callGemini(imageBase64, mimeType) {
 }
 
 app.post("/api/analyze", async (req, res) => {
-  const { imageBase64, mimeType = "image/jpeg", forceFallback = false } = req.body || {};
+  const { imageBase64, mimeType = "image/jpeg", forceFallback = false, mode = "NORMAL" } = req.body || {};
   if (!imageBase64) return res.status(400).json({ error: "imageBase64 is required" });
 
   const started = Date.now();
@@ -160,7 +161,7 @@ app.post("/api/analyze", async (req, res) => {
   }
 
   try {
-    const answer = await callGemini(imageBase64, mimeType);
+    const answer = await callGemini(imageBase64, mimeType, mode);
     return res.json({
       answer,
       provider: "Gemini fallback",
@@ -171,7 +172,9 @@ app.post("/api/analyze", async (req, res) => {
     const geminiError = error?.message || "Gemini fallback failed";
     console.error("Both AI providers failed", { groqError, geminiError });
     return res.status(503).json({
-      error: "Both AI providers failed or timed out.",
+      error: mode === "CODING"
+        ? "Coding analysis could not finish within the allowed verification window."
+        : "Analysis could not finish within the normal response window.",
       groq: groqError,
       gemini: geminiError,
       elapsedMs: Date.now() - started

@@ -49,13 +49,13 @@ let lastPopupTimer = null;
 let currentPopupText = "";
 let history = loadHistory();
 
-const DETECT_W = 160;
-const DETECT_H = 120;
+const DETECT_W = 192;
+const DETECT_H = 144;
 
 const cfg = {
-  threshold: 2.2,
-  stableFrames: 2,
-  intervalMs: 1200
+  threshold: 1.8,
+  stableFrames: 3,
+  intervalMs: 900
 };
 
 function setStatus(text, detail = "") {
@@ -134,10 +134,12 @@ function showPopup(answerText) {
 function parseAnswer(text) {
   const normalized = String(text || "").replace(/\r/g, "");
   const typeMatch = normalized.match(/(?:\*\*)?TYPE(?:\*\*)?\s*:\s*([^\n]+)/i);
+  const questionMatch = normalized.match(/(?:\*\*)?QUESTION(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?ANSWER(?:\*\*)?\s*:|$)/i);
   const answerMatch = normalized.match(/(?:\*\*)?ANSWER(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?EXPLANATION(?:\*\*)?\s*:|$)/i);
   const explanationMatch = normalized.match(/(?:\*\*)?EXPLANATION(?:\*\*)?\s*:\s*([\s\S]*)$/i);
   return {
     type: typeMatch ? typeMatch[1].trim().toUpperCase() : "OTHER",
+    question: questionMatch ? questionMatch[1].trim() : "",
     answer: answerMatch ? answerMatch[1].trim() : normalized.trim(),
     explanation: explanationMatch ? explanationMatch[1].trim() : ""
   };
@@ -297,15 +299,15 @@ function loop() {
       const aligned = alignedChangeMetrics(baseline, current);
       const tinyTextChange =
         aligned.residualMean >= cfg.threshold &&
-        aligned.changedRatio >= 0.00055 &&
+        aligned.changedRatio >= 0.00022 &&
         aligned.changedBlocks >= 1 &&
-        aligned.changedBlocks <= 45;
+        aligned.changedBlocks <= 70;
 
       const normalQuestionChange =
-        aligned.residualMean >= Math.max(1.4, cfg.threshold * 0.72) &&
-        aligned.changedRatio >= 0.0012 &&
-        aligned.changedBlocks >= 2 &&
-        aligned.changedBlocks <= 90;
+        aligned.residualMean >= Math.max(1.15, cfg.threshold * 0.65) &&
+        aligned.changedRatio >= 0.00065 &&
+        aligned.changedBlocks >= 1 &&
+        aligned.changedBlocks <= 130;
 
       const meaningfulChange = tinyTextChange || normalQuestionChange;
 
@@ -361,14 +363,14 @@ function grayAt(data, x, y) {
 
 function inQuestionRegion(x, y) {
   // Ignore the extreme camera edges and the bottom button/toolbar area.
-  return x >= 8 && x <= 152 && y >= 10 && y <= 92;
+  return x >= 10 && x <= 182 && y >= 12 && y <= 112;
 }
 
 function meanDifference(a, b) {
   let total = 0;
   let count = 0;
-  for (let y = 10; y <= 92; y += 2) {
-    for (let x = 8; x <= 152; x += 2) {
+  for (let y = 12; y <= 112; y += 2) {
+    for (let x = 10; x <= 182; x += 2) {
       const ag = grayAt(a, x, y);
       const bg = grayAt(b, x, y);
       total += Math.abs(ag - bg);
@@ -384,12 +386,12 @@ function changeMetrics(a, b) {
   let changedPixels = 0;
   let changedBlocks = 0;
 
-  for (let by = 10; by < 92; by += 6) {
-    for (let bx = 8; bx < 152; bx += 6) {
+  for (let by = 12; by < 112; by += 6) {
+    for (let bx = 10; bx < 182; bx += 6) {
       let blockDiff = 0;
       let blockCount = 0;
-      for (let y = by; y < Math.min(by + 6, 93); y++) {
-        for (let x = bx; x < Math.min(bx + 6, 153); x++) {
+      for (let y = by; y < Math.min(by + 6, 113); y++) {
+        for (let x = bx; x < Math.min(bx + 6, 183); x++) {
           if (!inQuestionRegion(x, y)) continue;
           const d = Math.abs(grayAt(a, x, y) - grayAt(b, x, y));
           blockDiff += d;
@@ -419,11 +421,11 @@ function alignedChangeMetrics(a, b) {
     for (let dx = -3; dx <= 3; dx++) {
       let total = 0;
       let count = 0;
-      for (let y = 14; y <= 88; y += 3) {
-        for (let x = 12; x <= 148; x += 3) {
+      for (let y = 16; y <= 108; y += 3) {
+        for (let x = 14; x <= 178; x += 3) {
           const xx = x + dx;
           const yy = y + dy;
-          if (xx < 8 || xx > 152 || yy < 10 || yy > 92) continue;
+          if (xx < 10 || xx > 182 || yy < 12 || yy > 112) continue;
           total += Math.abs(grayAt(a, x, y) - grayAt(b, xx, yy));
           count++;
         }
@@ -438,16 +440,16 @@ function alignedChangeMetrics(a, b) {
   let changedPixels = 0;
   let changedBlocks = 0;
 
-  for (let by = 10; by < 92; by += 5) {
-    for (let bx = 8; bx < 153; bx += 5) {
+  for (let by = 12; by < 112; by += 5) {
+    for (let bx = 10; bx < 183; bx += 5) {
       let block = 0;
       let blockCount = 0;
-      for (let y = by; y < Math.min(by + 5, 93); y++) {
-        for (let x = bx; x < Math.min(bx + 5, 153); x++) {
+      for (let y = by; y < Math.min(by + 5, 113); y++) {
+        for (let x = bx; x < Math.min(bx + 5, 183); x++) {
           if (!inQuestionRegion(x, y)) continue;
           const xx = x + best.dx;
           const yy = y + best.dy;
-          if (xx < 8 || xx > 152 || yy < 10 || yy > 92) continue;
+          if (xx < 10 || xx > 182 || yy < 12 || yy > 112) continue;
           const d = Math.abs(grayAt(a, x, y) - grayAt(b, xx, yy));
           residualTotal += d;
           residualCount++;
@@ -471,8 +473,8 @@ function alignedChangeMetrics(a, b) {
 
 function visualSignature(data) {
   let signature = "";
-  for (let y = 10; y <= 92; y += 5) {
-    for (let x = 8; x <= 152; x += 5) {
+  for (let y = 12; y <= 112; y += 5) {
+    for (let x = 10; x <= 182; x += 5) {
       signature += Math.floor(grayAt(data, x, y) / 32).toString(16);
     }
   }
@@ -499,17 +501,19 @@ async function analyzeCurrentFrame(manual, signature = null) {
 
     const c = capture.getContext("2d");
     c.drawImage(video, 0, 0, capture.width, capture.height);
-    const dataUrl = capture.toDataURL("image/jpeg", 0.82);
+    const dataUrl = capture.toDataURL("image/jpeg", 0.88);
     const imageBase64 = dataUrl.split(",")[1];
 
+    // Normal questions are capped around 25s. Coding gets more room after the
+    // first model identifies it as CODING. The server also enforces its own cap.
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 22000);
+    const timeout = setTimeout(() => controller.abort(), 90000);
     let response;
     try {
       response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageBase64, mimeType: "image/jpeg" }),
+        body: JSON.stringify({ imageBase64, mimeType: "image/jpeg", mode: "AUTO" }),
         signal: controller.signal
       });
     } finally {
@@ -519,18 +523,27 @@ async function analyzeCurrentFrame(manual, signature = null) {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
 
-    const answerText = String(data.answer || "");
+    let answerText = String(data.answer || "");
+    let parsed = parseAnswer(answerText);
     const unreadable = /unable to read|cannot read|can't read|unreadable|not readable/i.test(answerText);
-    if (unreadable && data.provider === "Groq") {
-      setStatus("Reading again", "Groq could not confidently read the code; requesting the higher-quality fallback image analysis…");
+
+    // Coding or unreadable results get a longer Gemini verification pass.
+    // Normal MCQ/English/numerical answers do not wait through a long fallback.
+    if ((unreadable || parsed.type === "CODING") && data.provider === "Groq") {
+      setStatus(
+        parsed.type === "CODING" ? "Verifying code" : "Reading again",
+        parsed.type === "CODING"
+          ? "Coding question detected — allowing the longer verification pass…"
+          : "Groq could not confidently read the frame; trying Gemini…"
+      );
       const retryController = new AbortController();
-      const retryTimeout = setTimeout(() => retryController.abort(), 12000);
+      const retryTimeout = setTimeout(() => retryController.abort(), parsed.type === "CODING" ? 60000 : 10000);
       let retryResponse;
       try {
         retryResponse = await fetch("/api/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ imageBase64, mimeType: "image/jpeg", forceFallback: true }),
+          body: JSON.stringify({ imageBase64, mimeType: "image/jpeg", forceFallback: true, mode: parsed.type === "CODING" ? "CODING" : "NORMAL" }),
           signal: retryController.signal
         });
       } finally {
@@ -540,15 +553,16 @@ async function analyzeCurrentFrame(manual, signature = null) {
       if (retryResponse.ok && retryData.answer) {
         data.answer = retryData.answer;
         data.provider = retryData.provider || "Gemini fallback";
+        answerText = String(data.answer);
+        parsed = parseAnswer(answerText);
       }
     }
 
-    const parsed = parseAnswer(data.answer);
     const answerForDisplay = parsed.answer || data.answer;
     answerEl.textContent = answerForDisplay;
     answerEl.className = "answer";
     showPopup(data.answer);
-    addHistory(answerForDisplay, parsed.type, "Detected question — open the camera capture for the original text.");
+    addHistory(answerForDisplay, parsed.type, parsed.question || "Detected question");
 
     apiCount++;
     previousAnalyzedSignature = signature || visualSignature(new Uint8ClampedArray(ctx.getImageData(0, 0, DETECT_W, DETECT_H).data));
