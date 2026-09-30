@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "6.8.0",
+    version: "6.9.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -93,23 +93,17 @@ async function callGroq(imageBase64, mimeType) {
         messages: [{
           role: "user",
           content: [
-            {
-              type: "text",
-              text: `${prompt}\n\nSolve this captured question carefully in ONE pass. Read every visible word, number, symbol, statement, condition, and option before answering. For numerical questions, calculate carefully. For programming questions, fully read the statement and code before solving. Return the required structured answer without unnecessary reasoning.`
-            },
-            { type: "image_url", image_url: { url: dataUrl(imageBase64, mimeType), detail: "high" } }
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: dataUrl(imageBase64, mimeType) } }
           ]
         }],
         temperature: 0,
-        max_completion_tokens: 900,
-        // Fast visual/OCR pass. Reasoning is deliberately disabled so the
-        // model spends its time reading the screenshot and producing the answer.
+        max_completion_tokens: 1100,
         reasoning_effort: "none",
-        reasoning_format: "hidden",
         stream: false
       })
     },
-    14000
+    16000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Groq HTTP ${response.status}`);
@@ -137,7 +131,7 @@ async function callGemini(imageBase64, mimeType, mode = "NORMAL", timeoutMs = nu
         generationConfig: {
           temperature: 0,
           maxOutputTokens: 1200,
-          thinkingConfig: { thinkingLevel: mode === "CODING" ? "high" : "medium" }
+          thinkingConfig: { thinkingLevel: "low" }
         }
       })
     },
