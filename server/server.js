@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "5.5.0",
+    version: "5.6.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -32,7 +32,7 @@ const prompt = `
 You are a fast visual question-answering assistant for the user's own non-proctored practice/mock material.
 
 IMPORTANT: This image may contain a PROGRAMMING QUESTION or CODE shown on a phone/laptop screen.
-Read the image carefully before deciding that text is unreadable.
+Read ONLY the question shown in this exact captured frame. Do not rely on any previous question, previous answer, or outside conversation context. Before answering, make sure the answer corresponds to the question actually visible in this image.
 
 For programming questions:
 1. First mentally transcribe the visible question, constraints, input/output format, and code/text.
@@ -43,12 +43,13 @@ For programming questions:
 
 Return exactly:
 TYPE: <MCQ | ENGLISH | NUMERICAL | CODING | OTHER>
-QUESTION: <short transcription of the question; include the important options/constraints when visible>
+QUESTION: <short transcription of the question>
+OPTIONS: <for MCQ, list every visible option on separate lines; otherwise write NONE>
 ANSWER: <direct answer or complete code>
 EXPLANATION: <one short useful sentence>
 
 Rules:
-- MCQ: give the correct option text and, if useful, its letter.
+- MCQ: transcribe ALL visible options under OPTIONS, then give the correct option text and, if useful, its letter.
 - English/fill-in-the-blank: give the exact word or phrase.
 - Numerical/aptitude: give the final result with the essential calculation only.
 - Python/programming: give the complete Python 3 solution when code is requested.

@@ -10,6 +10,7 @@ const resetBtn = document.getElementById("resetBtn");
 const popupCloseBtn = document.getElementById("popupCloseBtn");
 const popupCopyBtn = document.getElementById("popupCopyBtn");
 const historyList = document.getElementById("historyList");
+const copyHistoryBtn = document.getElementById("copyHistoryBtn");
 const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 
 const statusEl = document.getElementById("status");
@@ -47,6 +48,10 @@ let apiCount = 0;
 let skippedCount = 0;
 let lastPopupTimer = null;
 let currentPopupText = "";
+let pendingCapture = null;
+let pendingSignature = null;
+let pendingQuestionVersion = 0;
+let analysisVersion = 0;
 let history = loadHistory();
 
 const DETECT_W = 192;
@@ -85,28 +90,74 @@ function saveHistory() {
 function renderHistory() {
   if (!history.length) {
     historyList.innerHTML = '<div class="history-empty">Previous questions and answers will appear here.</div>';
+    copyHistoryBtn.disabled = true;
     return;
   }
-  historyList.innerHTML = history.map((item, index) => `
-    <article class="history-item">
-      <div class="history-meta"><span>${escapeHtml(item.type || "OTHER")}</span><time>${escapeHtml(item.time || "")}</time></div>
+  copyHistoryBtn.disabled = false;
+  historyList.innerHTML = history.map((item, index) => {
+    const options = Array.isArray(item.options) ? item.options : [];
+    const optionsHtml = options.length
+      ? `<div class="history-options"><div class="history-label">Options</div>${options.map((opt, i) => `<div class="history-option"><span>${String.fromCharCode(65+i)}.</span> ${escapeHtml(opt)}</div>`).join('')}</div>`
+      : '';
+    return `<article class="history-item">
+      <div class="history-meta"><span>Q${escapeHtml(item.number || index + 1)} · ${escapeHtml(item.type || "OTHER")}</span><time>${escapeHtml(item.time || "")}</time></div>
+      <div class="history-label">Question</div>
       <div class="history-question">${escapeHtml(item.question || "Detected question")}</div>
+      ${optionsHtml}
+      <div class="history-label">Solution</div>
       <div class="history-answer">${escapeHtml(item.answer || "")}</div>
-      <div class="history-actions"><button data-copy-index="${index}">Copy</button><button data-view-index="${index}">View</button></div>
-    </article>`).join("");
+    </article>`;
+  }).join("");
+}
+
+function buildAllHistoryCopyText() {
+  return history.slice().reverse().map((item, index) => {
+    const number = item.number || index + 1;
+    return buildHistoryCopyText({ ...item, number });
+  }).join("\n\n--------------------------------\n\n");
+}
+
+function buildHistoryCopyText(item) {
+  const options = Array.isArray(item.options) ? item.options : [];
+  return [
+    `Q${item.number || ""}`.trim(),
+    `Question: ${item.question || ""}`,
+    options.length ? `Options:\n${options.map((o,i)=>`${String.fromCharCode(65+i)}. ${o}`).join("\n")}` : "",
+    `Solution: ${item.answer || ""}`,
+    item.explanation ? `Explanation: ${item.explanation}` : ""
+  ].filter(Boolean).join("\n\n");
 }
 
 function escapeHtml(value) {
   return String(value || "").replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch]));
 }
 
-function addHistory(answerText, type = "OTHER", questionText = "") {
-  history.unshift({
+function normalizeQuestion(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[^a-z0-9%().,+\-*/=<>? ]/g, "")
+    .trim();
+}
+
+function addHistory(answerText, type = "OTHER", questionText = "", options = [], explanation = "") {
+  const question = questionText || "Detected question";
+  const key = normalizeQuestion(question);
+  const existingIndex = key && key !== "detected question"
+    ? history.findIndex(item => normalizeQuestion(item.question) === key)
+    : -1;
+  const item = {
     type,
-    question: questionText || "Detected question",
+    question,
+    options: Array.isArray(options) ? options : [],
     answer: answerText,
+    explanation: explanation || "",
     time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-  });
+  };
+  if (existingIndex >= 0) {
+    history.splice(existingIndex, 1);
+  }
+  history.unshift(item);
   history = history.slice(0, 50);
   saveHistory();
   renderHistory();
@@ -135,11 +186,17 @@ function parseAnswer(text) {
   const normalized = String(text || "").replace(/\r/g, "");
   const typeMatch = normalized.match(/(?:\*\*)?TYPE(?:\*\*)?\s*:\s*([^\n]+)/i);
   const questionMatch = normalized.match(/(?:\*\*)?QUESTION(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?ANSWER(?:\*\*)?\s*:|$)/i);
+  const optionsMatch = normalized.match(/(?:\*\*)?OPTIONS(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?ANSWER(?:\*\*)?\s*:|$)/i);
   const answerMatch = normalized.match(/(?:\*\*)?ANSWER(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?EXPLANATION(?:\*\*)?\s*:|$)/i);
   const explanationMatch = normalized.match(/(?:\*\*)?EXPLANATION(?:\*\*)?\s*:\s*([\s\S]*)$/i);
+  const optionsRaw = optionsMatch ? optionsMatch[1].trim() : "";
+  const options = optionsRaw && !/^NONE$/i.test(optionsRaw)
+    ? optionsRaw.split(/\n+/).map(x => x.replace(/^\s*(?:[A-D][.)]|[-•])\s*/, "").trim()).filter(Boolean)
+    : [];
   return {
     type: typeMatch ? typeMatch[1].trim().toUpperCase() : "OTHER",
     question: questionMatch ? questionMatch[1].trim() : "",
+    options,
     answer: answerMatch ? answerMatch[1].trim() : normalized.trim(),
     explanation: explanationMatch ? explanationMatch[1].trim() : ""
   };
@@ -149,6 +206,8 @@ function resetSession() {
   apiCount = 0;
   skippedCount = 0;
   previousAnalyzedSignature = null;
+  pendingCapture = null;
+  pendingSignature = null;
   updateStats();
   answerEl.textContent = "No answer yet.";
   answerEl.className = "answer empty";
@@ -182,18 +241,17 @@ popupCopyBtn.onclick = async () => {
   try { await navigator.clipboard.writeText(currentPopupText); popupCopyBtn.textContent = "Copied ✓"; setTimeout(() => popupCopyBtn.textContent = "Copy answer", 1200); } catch { popupCopyBtn.textContent = "Copy failed"; }
 };
 clearHistoryBtn.onclick = () => { history = []; saveHistory(); renderHistory(); };
-historyList.addEventListener("click", async (event) => {
-  const copy = event.target.closest("[data-copy-index]");
-  const view = event.target.closest("[data-view-index]");
-  if (copy) {
-    const item = history[Number(copy.dataset.copyIndex)];
-    if (item) { try { await navigator.clipboard.writeText(item.answer); copy.textContent = "Copied ✓"; setTimeout(() => copy.textContent = "Copy", 1000); } catch {} }
+copyHistoryBtn.onclick = async () => {
+  if (!history.length) return;
+  try {
+    await navigator.clipboard.writeText(buildAllHistoryCopyText());
+    copyHistoryBtn.textContent = "Copied ✓";
+    setTimeout(() => copyHistoryBtn.textContent = "Copy all history", 1200);
+  } catch {
+    copyHistoryBtn.textContent = "Copy failed";
+    setTimeout(() => copyHistoryBtn.textContent = "Copy all history", 1200);
   }
-  if (view) {
-    const item = history[Number(view.dataset.viewIndex)];
-    if (item) { answerEl.textContent = item.answer; answerEl.className = "answer"; showPopup(item.answer); }
-  }
-});
+};
 renderHistory();
 startBtn.onclick = startCamera;
 stopBtn.onclick = stopCamera;
@@ -223,6 +281,8 @@ async function startCamera() {
     startupStableCount = 0;
     lastAnalysis = 0;
     previousAnalyzedSignature = null;
+    pendingCapture = null;
+    pendingSignature = null;
 
     startBtn.disabled = true;
     stopBtn.disabled = false;
@@ -259,6 +319,8 @@ function stopCamera() {
   changed = false;
   stableCount = 0;
   startupStableCount = 0;
+  pendingCapture = null;
+  pendingSignature = null;
   hidePopup();
   setBadge("READY", "idle");
   setStatus("Stopped", "Camera monitoring is off.");
@@ -284,7 +346,7 @@ function loop() {
         baseline = current;
         startupStableCount = 0;
         setStatus("Question detected", "Analyzing the first stable question automatically…");
-        analyzeCurrentFrame(false, visualSignature(current));
+        analyzeCapturedFrame(captureCurrentFrame(), false, visualSignature(current));
       }
     } else {
       const metrics = changeMetrics(baseline, current);
@@ -313,6 +375,11 @@ function loop() {
 
       if (!changed && meaningfulChange) {
         changed = true;
+        // A genuinely new question has appeared. Never leave the previous
+        // answer visible while the new question is being analyzed.
+        hidePopup();
+        answerEl.textContent = "Waiting for the new question…";
+        answerEl.className = "answer empty";
         candidate = current;
         stableCount = 0;
         meterBar.style.width = "20%";
@@ -331,6 +398,7 @@ function loop() {
 
         if (stableCount >= cfg.stableFrames) {
           const signature = visualSignature(current);
+          const capture = captureCurrentFrame();
           changed = false;
           stableCount = 0;
           candidate = null;
@@ -342,9 +410,15 @@ function loop() {
             updateStats();
             setStatus("Same question skipped", "No AI request — waiting for the next meaningful text change.");
           } else if (!busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
-            analyzeCurrentFrame(false, signature);
+            analyzeCapturedFrame(capture, false, signature);
           } else {
-            setStatus("New question ready", "AI request is already in progress; no duplicate request will be sent.");
+            // Never lose a question just because the previous AI request is
+            // still running. Keep the newest stable frame and analyze it as
+            // soon as the current request finishes.
+            pendingCapture = capture;
+            pendingSignature = signature;
+            pendingQuestionVersion++;
+            setStatus("Question queued", "Previous answer is still processing; the newest question will be analyzed next.");
           }
         }
       }
@@ -481,31 +555,47 @@ function visualSignature(data) {
   return signature;
 }
 
+function captureCurrentFrame() {
+  const capture = document.createElement("canvas");
+  const maxWidth = 1280;
+  const scale = Math.min(1, maxWidth / (video.videoWidth || 1280));
+  capture.width = Math.max(1, Math.round((video.videoWidth || 1280) * scale));
+  capture.height = Math.max(1, Math.round((video.videoHeight || 720) * scale));
+  const c = capture.getContext("2d", { alpha: false });
+  c.imageSmoothingEnabled = true;
+  c.imageSmoothingQuality = "high";
+  c.drawImage(video, 0, 0, capture.width, capture.height);
+  const dataUrl = capture.toDataURL("image/jpeg", 0.88);
+  return { dataUrl, imageBase64: dataUrl.split(",")[1] };
+}
+
 async function analyzeCurrentFrame(manual, signature = null) {
-  if (busy || !stream) return;
+  if (!stream || busy) return;
   if (!manual && Date.now() - lastAnalysis < cfg.intervalMs) return;
+  analyzeCapturedFrame(captureCurrentFrame(), manual, signature);
+}
+
+async function analyzeCapturedFrame(capture, manual, signature = null) {
+  if (!stream) return;
+  if (!manual && busy) {
+    pendingCapture = capture;
+    pendingSignature = signature;
+    return;
+  }
+  if (!manual && Date.now() - lastAnalysis < cfg.intervalMs) {
+    pendingCapture = capture;
+    pendingSignature = signature;
+    return;
+  }
 
   busy = true;
+  const thisAnalysisVersion = ++analysisVersion;
   lastAnalysis = Date.now();
   setBadge("ANALYZING", "busy");
-  setStatus("Analyzing", "One AI request — reading the changed question…");
+  setStatus("Analyzing", "Reading the exact captured question…");
 
   try {
-    const capture = document.createElement("canvas");
-    // 960px is enough for typical phone-camera question text while keeping
-    // upload size and vision latency down.
-    const maxWidth = 1280;
-    const scale = Math.min(1, maxWidth / video.videoWidth);
-    capture.width = Math.round(video.videoWidth * scale);
-    capture.height = Math.round(video.videoHeight * scale);
-
-    const c = capture.getContext("2d");
-    c.drawImage(video, 0, 0, capture.width, capture.height);
-    const dataUrl = capture.toDataURL("image/jpeg", 0.88);
-    const imageBase64 = dataUrl.split(",")[1];
-
-    // Normal questions are capped around 25s. Coding gets more room after the
-    // first model identifies it as CODING. The server also enforces its own cap.
+    const imageBase64 = capture.imageBase64;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 90000);
     let response;
@@ -527,8 +617,6 @@ async function analyzeCurrentFrame(manual, signature = null) {
     let parsed = parseAnswer(answerText);
     const unreadable = /unable to read|cannot read|can't read|unreadable|not readable/i.test(answerText);
 
-    // Coding or unreadable results get a longer Gemini verification pass.
-    // Normal MCQ/English/numerical answers do not wait through a long fallback.
     if ((unreadable || parsed.type === "CODING") && data.provider === "Groq") {
       setStatus(
         parsed.type === "CODING" ? "Verifying code" : "Reading again",
@@ -562,22 +650,37 @@ async function analyzeCurrentFrame(manual, signature = null) {
     answerEl.textContent = answerForDisplay;
     answerEl.className = "answer";
     showPopup(data.answer);
-    addHistory(answerForDisplay, parsed.type, parsed.question || "Detected question");
+    addHistory(answerForDisplay, parsed.type, parsed.question || "Detected question", parsed.options, parsed.explanation);
 
     apiCount++;
-    previousAnalyzedSignature = signature || visualSignature(new Uint8ClampedArray(ctx.getImageData(0, 0, DETECT_W, DETECT_H).data));
+    previousAnalyzedSignature = signature || null;
     updateStats();
 
     setBadge("ANSWER READY", "live");
-    setStatus("Answer ready", "Popup shown. Local detector is watching for the next real question/text change.");
+    setStatus("Answer ready", "Popup shown. Watching for the next meaningful question/text change.");
     meterBar.style.width = "0%";
   } catch (err) {
     setBadge("ERROR", "busy");
     const message = err?.name === "AbortError"
-      ? "AI timed out. No repeated request was sent; waiting for the next question."
+      ? "AI timed out. Waiting for the next question."
       : (err.message || "Try again.");
     setStatus("Analysis failed", message);
   } finally {
     busy = false;
+
+    // If a newer question arrived while this request was running, immediately
+    // process the newest stable capture instead of leaving the old answer on screen.
+    if (pendingCapture && pendingSignature && pendingSignature !== previousAnalyzedSignature && stream) {
+      const nextCapture = pendingCapture;
+      const nextSignature = pendingSignature;
+      pendingCapture = null;
+      pendingSignature = null;
+      hidePopup();
+      answerEl.textContent = "Analyzing the latest question…";
+      answerEl.className = "answer empty";
+      setTimeout(() => {
+        if (stream && !busy) analyzeCapturedFrame(nextCapture, false, nextSignature);
+      }, 120);
+    }
   }
 }

@@ -12,7 +12,7 @@
     <header>
       <div>
         <h1>FrameSolve AI</h1>
-        <p>Fast live camera practice assistant</p>
+        <p>Smart live camera practice assistant</p>
       </div>
       <span id="stateBadge" class="badge idle">READY</span>
     </header>
@@ -52,7 +52,7 @@
         <div><span>Skipped</span><strong id="skippedCount">0</strong></div>
       </div>
       <div class="meter"><div id="meterBar"></div></div>
-      <p id="statusDetail">The phone detects character/text/number changes locally. AI is called only after a stable meaningful change. MCQ/English target ≤25s, numerical ≤40s, coding gets a longer verification window. Groq is primary; Gemini is fallback.</p>
+      <p id="statusDetail">The phone detects character/text/number changes locally. A new question is queued even if the previous answer is still processing, and the exact captured frame is analyzed. MCQ/English target ≤25s, numerical ≤40s, coding gets a longer verification window. Groq is primary; Gemini is fallback.</p>
     </section>
 
     <section class="history-card">
@@ -62,6 +62,9 @@
       </div>
       <div id="historyList" class="history-list">
         <div class="history-empty">Previous questions and answers will appear here.</div>
+      </div>
+      <div class="history-copy-all-wrap">
+        <button id="copyHistoryBtn" class="history-copy-all">Copy all history</button>
       </div>
     </section>
 

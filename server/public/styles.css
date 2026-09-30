@@ -242,6 +242,7 @@ footer {
 .history-meta { display:flex; justify-content:space-between; gap:10px; font-size:10px; font-weight:800; color:#64748b; text-transform:uppercase; }
 .history-question { margin-top:7px; font-size:12px; color:#334155; }
 .history-answer { margin-top:7px; white-space:pre-wrap; font-size:14px; line-height:1.45; color:#0f172a; max-height:180px; overflow:auto; }
-.history-actions { display:flex; gap:7px; margin-top:9px; }
-.history-actions button, #clearHistoryBtn, .popup-copy { background:#e2e8f0; color:#0f172a; padding:8px 10px; border-radius:9px; font-size:12px; }
+.history-copy-all-wrap { display:flex; justify-content:flex-end; margin-top:12px; }
+.history-copy-all, #clearHistoryBtn, .popup-copy { background:#e2e8f0; color:#0f172a; padding:9px 12px; border-radius:9px; font-size:12px; font-weight:700; border:0; }
+.history-copy-all:disabled { opacity:.45; cursor:not-allowed; }
 .popup-copy { margin-top:9px; background:rgba(255,255,255,.14); color:#fff; }
