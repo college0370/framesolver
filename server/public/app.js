@@ -52,10 +52,15 @@ let pendingCapture = null;
 let pendingSignature = null;
 let pendingQuestionVersion = 0;
 let analysisVersion = 0;
+let latestQuestionVersion = 0;
+let motionReacquire = false;
+let motionStableCount = 0;
 let history = loadHistory();
 
 const DETECT_W = 192;
 const DETECT_H = 144;
+const CAPTURE_MAX_W = 1600;
+const CAPTURE_JPEG_QUALITY = 0.92;
 
 const cfg = {
   threshold: 1.8,
@@ -283,6 +288,9 @@ async function startCamera() {
     previousAnalyzedSignature = null;
     pendingCapture = null;
     pendingSignature = null;
+    latestQuestionVersion = 0;
+    motionReacquire = false;
+    motionStableCount = 0;
 
     startBtn.disabled = true;
     stopBtn.disabled = false;
@@ -295,6 +303,10 @@ async function startCamera() {
     setStatus("Watching", "Local detector is watching only the question/options area. No AI request yet.");
     loop();
   } catch (err) {
+    if (questionVersionAtStart !== latestQuestionVersion && !manual) {
+      setStatus("New question ready", "Previous request ended late; the newer question remains queued.");
+      return;
+    }
     setBadge("ERROR", "busy");
     setStatus("Camera unavailable", err.message || "Allow camera permission and try again.");
   }
@@ -321,6 +333,9 @@ function stopCamera() {
   startupStableCount = 0;
   pendingCapture = null;
   pendingSignature = null;
+  latestQuestionVersion++;
+  motionReacquire = false;
+  motionStableCount = 0;
   hidePopup();
   setBadge("READY", "idle");
   setStatus("Stopped", "Camera monitoring is off.");
@@ -373,7 +388,40 @@ function loop() {
 
       const meaningfulChange = tinyTextChange || normalQuestionChange;
 
+      // If the phone was moved, the whole frame can change and the normal
+      // localized detector intentionally ignores that broad motion. After the
+      // camera settles, compare the new stable frame with the last analyzed
+      // frame. If the scene/question is actually different, treat it as a
+      // new question. This prevents the old answer from surviving a phone move.
+      const broadMotion = frameDiff >= 5.5 || aligned.residualMean >= 5.5;
+      if (broadMotion && !changed) {
+        motionReacquire = true;
+        motionStableCount = 0;
+      }
+      if (motionReacquire && !changed) {
+        if (frameDiff < 1.55 && aligned.residualMean < 2.2) motionStableCount++;
+        else motionStableCount = 0;
+        if (motionStableCount >= 6) {
+          const settledDifference = aligned.residualMean;
+          const settledSignature = visualSignature(current);
+          motionReacquire = false;
+          motionStableCount = 0;
+          if (settledDifference >= 2.0 && settledSignature !== previousAnalyzedSignature) {
+            changed = true;
+            latestQuestionVersion++;
+            hidePopup();
+            answerEl.textContent = "New question detected…";
+            answerEl.className = "answer empty";
+            candidate = current;
+            stableCount = 0;
+            meterBar.style.width = "20%";
+            setStatus("Question changed", "Phone moved and settled — checking the new question before sending it.");
+          }
+        }
+      }
+
       if (!changed && meaningfulChange) {
+        latestQuestionVersion++;
         changed = true;
         // A genuinely new question has appeared. Never leave the previous
         // answer visible while the new question is being analyzed.
@@ -556,16 +604,51 @@ function visualSignature(data) {
 }
 
 function captureCurrentFrame() {
+  const sourceW = video.videoWidth || 1280;
+  const sourceH = video.videoHeight || 720;
+  const maxWidth = CAPTURE_MAX_W;
+  const scale = Math.min(1, maxWidth / sourceW);
+  const outW = Math.max(1, Math.round(sourceW * scale));
+  const outH = Math.max(1, Math.round(sourceH * scale));
+
+  // Keep the full question/options area but remove only the extreme bottom
+  // browser/camera controls that cannot contain the question. This gives the
+  // vision model more pixels per character without losing LTI-style layouts.
+  const cropTop = Math.round(outH * 0.01);
+  const cropBottom = Math.round(outH * 0.94);
+  const cropH = Math.max(1, cropBottom - cropTop);
+
   const capture = document.createElement("canvas");
-  const maxWidth = 1280;
-  const scale = Math.min(1, maxWidth / (video.videoWidth || 1280));
-  capture.width = Math.max(1, Math.round((video.videoWidth || 1280) * scale));
-  capture.height = Math.max(1, Math.round((video.videoHeight || 720) * scale));
+  capture.width = outW;
+  capture.height = cropH;
   const c = capture.getContext("2d", { alpha: false });
   c.imageSmoothingEnabled = true;
   c.imageSmoothingQuality = "high";
-  c.drawImage(video, 0, 0, capture.width, capture.height);
-  const dataUrl = capture.toDataURL("image/jpeg", 0.88);
+  c.drawImage(video, 0, cropTop / scale, sourceW, cropH / scale, 0, 0, outW, cropH);
+
+  // Screen text benefits from mild contrast/sharpening. Do not destroy the
+  // original colors; the model still receives a natural-looking image.
+  try {
+    const image = c.getImageData(0, 0, capture.width, capture.height);
+    const px = image.data;
+    for (let i = 0; i < px.length; i += 4) {
+      const r = px[i], g = px[i + 1], b = px[i + 2];
+      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+      const contrast = 1.18;
+      const offset = 128 * (1 - contrast);
+      px[i] = Math.max(0, Math.min(255, r * contrast + offset));
+      px[i + 1] = Math.max(0, Math.min(255, g * contrast + offset));
+      px[i + 2] = Math.max(0, Math.min(255, b * contrast + offset));
+      // Suppress faint blue/green cast from screen glare while preserving text.
+      if (gray > 180 && b > r * 1.12 && g > r * 1.04) {
+        const neutral = Math.round((r + g + b) / 3);
+        px[i] = neutral; px[i + 1] = neutral; px[i + 2] = neutral;
+      }
+    }
+    c.putImageData(image, 0, 0);
+  } catch {}
+
+  const dataUrl = capture.toDataURL("image/jpeg", CAPTURE_JPEG_QUALITY);
   return { dataUrl, imageBase64: dataUrl.split(",")[1] };
 }
 
@@ -576,6 +659,7 @@ async function analyzeCurrentFrame(manual, signature = null) {
 }
 
 async function analyzeCapturedFrame(capture, manual, signature = null) {
+  const questionVersionAtStart = latestQuestionVersion;
   if (!stream) return;
   if (!manual && busy) {
     pendingCapture = capture;
@@ -615,9 +699,10 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
 
     let answerText = String(data.answer || "");
     let parsed = parseAnswer(answerText);
-    const unreadable = /unable to read|cannot read|can't read|unreadable|not readable/i.test(answerText);
+    const unreadable = /unable to read|cannot read|can't read|unreadable|not readable|image is too blurry|text is too blurry/i.test(answerText);
+    const weakRead = !parsed.question || parsed.question.length < 8 || /detected question/i.test(parsed.question);
 
-    if ((unreadable || parsed.type === "CODING") && data.provider === "Groq") {
+    if ((unreadable || weakRead || parsed.type === "CODING") && data.provider === "Groq") {
       setStatus(
         parsed.type === "CODING" ? "Verifying code" : "Reading again",
         parsed.type === "CODING"
@@ -644,6 +729,13 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
         answerText = String(data.answer);
         parsed = parseAnswer(answerText);
       }
+    }
+
+    // Never let a late response for an older question overwrite a newer
+    // question. This is the main stale-answer protection.
+    if (!manual && questionVersionAtStart !== latestQuestionVersion) {
+      setStatus("New question ready", "Discarded a late answer for the previous question; processing the newest frame.");
+      return;
     }
 
     const answerForDisplay = parsed.answer || data.answer;

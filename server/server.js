@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "5.6.0",
+    version: "6.0.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -54,7 +54,11 @@ Rules:
 - Numerical/aptitude: give the final result with the essential calculation only.
 - Python/programming: give the complete Python 3 solution when code is requested.
 - SQL/CS theory: give the direct correct answer.
-- Do NOT say the image is unreadable merely because the code is small. Inspect the entire image first.
+- This is a camera photo of a screen. Use the full visible question area, not just the center.
+- The screen may contain watermarks, logos, timestamps, UI labels, or an email address. IGNORE those unrelated elements. They are not the question and must not cause a refusal or an error.
+- For LTI-style aptitude/reasoning questions, read the problem statement, every statement/condition, and every answer option before solving.
+- For coding questions, read the complete problem statement, constraints, input/output examples, and code text before solving.
+- Do NOT say the image is unreadable merely because the text is small. Inspect the enhanced screen image carefully first.
 - If a small portion genuinely cannot be read, state the specific missing portion and solve using all readable information.
 - Only use 'Unable to read the question' when the main question itself truly cannot be recovered from the image.
 `;
@@ -94,12 +98,12 @@ async function callGroq(imageBase64, mimeType) {
           ]
         }],
         temperature: 0,
-        max_completion_tokens: 1800,
+        max_completion_tokens: 1100,
         reasoning_effort: "none",
         stream: false
       })
     },
-    20000
+    16000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Groq HTTP ${response.status}`);
@@ -131,7 +135,7 @@ async function callGemini(imageBase64, mimeType, mode = "NORMAL") {
         }
       })
     },
-    mode === "CODING" ? 60000 : 8000
+    mode === "CODING" ? 60000 : 9000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);

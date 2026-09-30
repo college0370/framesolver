@@ -66,3 +66,12 @@ The v5.1 server uses a hard 20-second AI request timeout and the browser uses a 
 - Browser request timeout is 90s so the coding verification window is not cut off.
 - Capture uses up to 1280px JPEG at quality 0.88 for better code/text readability.
 - History stores the model-returned question text, answer, type, and time; Copy/View are available.
+
+
+## v6.0 image readability update
+- Captures up to 1600px wide at JPEG quality 0.92.
+- Removes only the extreme bottom camera/browser area and preserves the full question/options region.
+- Applies mild contrast and glare normalization to make screen text more visible.
+- Vision prompt explicitly ignores watermarks, logos, timestamps, UI labels, and email addresses that are unrelated to the question.
+- Normal Groq request is bounded to 16s; Gemini fallback is bounded to 9s, keeping normal analysis around a 25s window.
+- Coding keeps the longer verification path.
