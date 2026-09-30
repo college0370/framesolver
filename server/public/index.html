@@ -20,6 +20,12 @@
     <section class="camera-card">
       <div class="video-wrap">
         <video id="video" autoplay muted playsinline></video>
+        <div id="answerPopup" class="answer-popup" aria-live="polite">
+          <button id="popupCloseBtn" class="popup-close" aria-label="Close answer">×</button>
+          <div class="popup-label">AI ANSWER</div>
+          <div id="popupAnswer" class="popup-answer">—</div>
+          <div id="popupExplanation" class="popup-explanation"></div>
+        </div>
         <canvas id="compareCanvas" hidden></canvas>
         <div id="cameraPlaceholder" class="placeholder">
           <strong>Camera is off</strong>

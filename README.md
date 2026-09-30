@@ -1,4 +1,4 @@
-# FrameSolve Web — Final Camera Practice Assistant
+# FrameSolve Web 4.4 — Final Camera Practice Assistant
 
 Mobile-first web app for your own non-proctored mock/practice material.
 
@@ -35,6 +35,7 @@ Put your Gemini key in `.env`:
 GEMINI_API_KEY=YOUR_KEY
 PORT=8080
 GEMINI_MODEL=gemini-3.8-flash
+GEMINI_FALLBACK_MODEL=gemini-3.6-flash
 ```
 
 Start:
@@ -103,3 +104,14 @@ Use this for your own study and non-proctored practice/mock material. Do not use
 - The minimum AI interval protects against accidental repeated calls when the camera view changes rapidly.
 
 Use this only with your own non-proctored practice/mock material.
+
+
+### Automatic Gemini retry/fallback
+The server retries transient Gemini 429/5xx responses with exponential backoff. If Gemini 3.8 Flash remains temporarily unavailable with HTTP 503, it tries the stable Gemini 3.6 Flash fallback.
+
+
+## 4.4 UI and detection update
+- Detects localized changes such as a changed number, character, option, or fill-in-the-blank text.
+- Shows the latest answer in a compact camera overlay popup.
+- Keeps the full answer in the lower panel for reference.
+- Gemini uses low thinking and medium media resolution for a latency/legibility balance.

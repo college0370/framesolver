@@ -177,3 +177,59 @@ footer {
 }
 
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.stats div{padding:10px;border-radius:12px;background:#f3f4f6;text-align:center}.stats span{display:block;font-size:11px;color:#6b7280}.stats strong{display:block;margin-top:3px}.answer-actions{display:flex;gap:8px}.answer-actions button{white-space:nowrap}
+
+/* Parakeet-style answer overlay */
+.answer-popup {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 10;
+  padding: 13px 44px 14px 15px;
+  border: 1px solid rgba(255,255,255,.18);
+  border-radius: 16px;
+  background: rgba(7, 12, 22, .92);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 10px 32px rgba(0,0,0,.38);
+  transform: translateY(18px) scale(.98);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease;
+}
+.answer-popup.show {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+.popup-label {
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .12em;
+  color: #93c5fd;
+  margin-bottom: 4px;
+}
+.popup-answer {
+  font-size: 20px;
+  line-height: 1.22;
+  font-weight: 900;
+  color: #fff;
+}
+.popup-explanation {
+  margin-top: 5px;
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.popup-close {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(255,255,255,.12);
+  color: white;
+  font-size: 20px;
+  line-height: 30px;
+}
