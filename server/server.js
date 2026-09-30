@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "6.0.0",
+    version: "6.2.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -135,7 +135,7 @@ async function callGemini(imageBase64, mimeType, mode = "NORMAL") {
         }
       })
     },
-    mode === "CODING" ? 60000 : 9000
+    mode === "CODING" ? 60000 : 11000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);

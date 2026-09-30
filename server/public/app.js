@@ -9,7 +9,6 @@ const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
 const popupCloseBtn = document.getElementById("popupCloseBtn");
 const popupCopyBtn = document.getElementById("popupCopyBtn");
-const historyList = document.getElementById("historyList");
 const copyHistoryBtn = document.getElementById("copyHistoryBtn");
 const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 
@@ -17,7 +16,6 @@ const statusEl = document.getElementById("status");
 const detailEl = document.getElementById("statusDetail");
 const answerEl = document.getElementById("answer");
 const popupAnswerEl = document.getElementById("popupAnswer");
-const popupExplanationEl = document.getElementById("popupExplanation");
 const popup = document.getElementById("answerPopup");
 const badge = document.getElementById("stateBadge");
 const meterBar = document.getElementById("meterBar");
@@ -51,6 +49,7 @@ let currentPopupText = "";
 let pendingCapture = null;
 let pendingSignature = null;
 let pendingQuestionVersion = 0;
+let autoRetryUsedForVersion = -1;
 let analysisVersion = 0;
 let latestQuestionVersion = 0;
 let motionReacquire = false;
@@ -93,26 +92,7 @@ function saveHistory() {
 }
 
 function renderHistory() {
-  if (!history.length) {
-    historyList.innerHTML = '<div class="history-empty">Previous questions and answers will appear here.</div>';
-    copyHistoryBtn.disabled = true;
-    return;
-  }
-  copyHistoryBtn.disabled = false;
-  historyList.innerHTML = history.map((item, index) => {
-    const options = Array.isArray(item.options) ? item.options : [];
-    const optionsHtml = options.length
-      ? `<div class="history-options"><div class="history-label">Options</div>${options.map((opt, i) => `<div class="history-option"><span>${String.fromCharCode(65+i)}.</span> ${escapeHtml(opt)}</div>`).join('')}</div>`
-      : '';
-    return `<article class="history-item">
-      <div class="history-meta"><span>Q${escapeHtml(item.number || index + 1)} · ${escapeHtml(item.type || "OTHER")}</span><time>${escapeHtml(item.time || "")}</time></div>
-      <div class="history-label">Question</div>
-      <div class="history-question">${escapeHtml(item.question || "Detected question")}</div>
-      ${optionsHtml}
-      <div class="history-label">Solution</div>
-      <div class="history-answer">${escapeHtml(item.answer || "")}</div>
-    </article>`;
-  }).join("");
+  if (copyHistoryBtn) copyHistoryBtn.disabled = !history.length;
 }
 
 function buildAllHistoryCopyText() {
@@ -178,8 +158,6 @@ function showPopup(answerText) {
   const parsed = parseAnswer(answerText);
   currentPopupText = parsed.answer || answerText.trim() || "No answer";
   popupAnswerEl.textContent = parsed.answer || answerText.trim() || "No answer";
-  popupExplanationEl.textContent = parsed.explanation || "";
-  popupExplanationEl.classList.toggle("hidden", !parsed.explanation);
   popup.classList.remove("show");
   requestAnimationFrame(() => popup.classList.add("show"));
 
@@ -752,9 +730,59 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
     setStatus("Answer ready", "Popup shown. Watching for the next meaningful question/text change.");
     meterBar.style.width = "0%";
   } catch (err) {
+    // Automatic analysis gets one fresh Gemini-only attempt for the exact same
+    // captured frame. This fixes the case where the first background request
+    // times out/transiently fails but the same image succeeds when Analyze Now
+    // is pressed manually. It is limited to once per question version so the
+    // app cannot loop or burn quota.
+    if (!manual && autoRetryUsedForVersion !== questionVersionAtStart && stream) {
+      autoRetryUsedForVersion = questionVersionAtStart;
+      setBadge("RETRYING", "busy");
+      setStatus("Retrying current question", "The first automatic request did not finish; retrying the same captured frame once…");
+      try {
+        const retryController = new AbortController();
+        const retryTimeout = setTimeout(() => retryController.abort(), 11000);
+        let retryResponse;
+        try {
+          retryResponse = await fetch("/api/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ imageBase64: capture.imageBase64, mimeType: "image/jpeg", forceFallback: true, mode: "NORMAL" }),
+            signal: retryController.signal
+          });
+        } finally {
+          clearTimeout(retryTimeout);
+        }
+        const retryData = await retryResponse.json().catch(() => ({}));
+        if (retryResponse.ok && retryData.answer) {
+          // If a newer question appeared while the retry was running, never
+          // let this older response overwrite it.
+          if (questionVersionAtStart === latestQuestionVersion) {
+            const retryAnswerText = String(retryData.answer);
+            const retryParsed = parseAnswer(retryAnswerText);
+            const answerForDisplay = retryParsed.answer || retryAnswerText;
+            answerEl.textContent = answerForDisplay;
+            answerEl.className = "answer";
+            showPopup(retryAnswerText);
+            addHistory(answerForDisplay, retryParsed.type, retryParsed.question || "Detected question", retryParsed.options, retryParsed.explanation);
+            apiCount++;
+            previousAnalyzedSignature = signature || null;
+            updateStats();
+            setBadge("ANSWER READY", "live");
+            setStatus("Answer ready", "Automatic retry succeeded. Watching for the next meaningful question/text change.");
+            meterBar.style.width = "0%";
+            return;
+          }
+        }
+      } catch (retryErr) {
+        // Fall through to the normal error state; the next meaningful question
+        // gets a fresh automatic attempt.
+      }
+    }
+
     setBadge("ERROR", "busy");
     const message = err?.name === "AbortError"
-      ? "AI timed out. Waiting for the next question."
+      ? "Automatic AI request timed out after the normal response window."
       : (err.message || "Try again.");
     setStatus("Analysis failed", message);
   } finally {
