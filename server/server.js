@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "5.3.0",
+    version: "5.4.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -41,7 +41,8 @@ For programming questions:
 4. If code is requested, return complete runnable Python 3 code, not pseudocode.
 5. If the question asks for the output of code, return the exact output.
 
-Return:
+Return exactly:
+TYPE: <MCQ | ENGLISH | NUMERICAL | CODING | OTHER>
 ANSWER: <direct answer or complete code>
 EXPLANATION: <one short useful sentence>
 
@@ -91,7 +92,7 @@ async function callGroq(imageBase64, mimeType) {
           ]
         }],
         temperature: 0,
-        max_completion_tokens: 420,
+        max_completion_tokens: 1200,
         reasoning_effort: "none",
         stream: false
       })
@@ -123,7 +124,7 @@ async function callGemini(imageBase64, mimeType) {
         }],
         generationConfig: {
           temperature: 0,
-          maxOutputTokens: 420,
+          maxOutputTokens: 1200,
           thinkingConfig: { thinkingLevel: "low" }
         }
       })

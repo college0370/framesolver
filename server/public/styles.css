@@ -233,3 +233,15 @@ footer {
   font-size: 20px;
   line-height: 30px;
 }
+
+
+.history-card { padding: 15px; }
+.history-list { display: grid; gap: 10px; margin-top: 10px; }
+.history-empty { color: #64748b; font-size: 13px; padding: 12px 0; }
+.history-item { border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px; background: #f8fafc; }
+.history-meta { display:flex; justify-content:space-between; gap:10px; font-size:10px; font-weight:800; color:#64748b; text-transform:uppercase; }
+.history-question { margin-top:7px; font-size:12px; color:#334155; }
+.history-answer { margin-top:7px; white-space:pre-wrap; font-size:14px; line-height:1.45; color:#0f172a; max-height:180px; overflow:auto; }
+.history-actions { display:flex; gap:7px; margin-top:9px; }
+.history-actions button, #clearHistoryBtn, .popup-copy { background:#e2e8f0; color:#0f172a; padding:8px 10px; border-radius:9px; font-size:12px; }
+.popup-copy { margin-top:9px; background:rgba(255,255,255,.14); color:#fff; }

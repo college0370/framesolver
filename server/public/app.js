@@ -8,6 +8,9 @@ const captureBtn = document.getElementById("captureBtn");
 const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
 const popupCloseBtn = document.getElementById("popupCloseBtn");
+const popupCopyBtn = document.getElementById("popupCopyBtn");
+const historyList = document.getElementById("historyList");
+const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 
 const statusEl = document.getElementById("status");
 const detailEl = document.getElementById("statusDetail");
@@ -43,6 +46,8 @@ let previousAnalyzedSignature = null;
 let apiCount = 0;
 let skippedCount = 0;
 let lastPopupTimer = null;
+let currentPopupText = "";
+let history = loadHistory();
 
 const DETECT_W = 160;
 const DETECT_H = 120;
@@ -68,6 +73,45 @@ function updateStats() {
   skippedCountEl.textContent = skippedCount;
 }
 
+function loadHistory() {
+  try { return JSON.parse(localStorage.getItem("framesolve_history") || "[]"); }
+  catch { return []; }
+}
+
+function saveHistory() {
+  localStorage.setItem("framesolve_history", JSON.stringify(history.slice(0, 50)));
+}
+
+function renderHistory() {
+  if (!history.length) {
+    historyList.innerHTML = '<div class="history-empty">Previous questions and answers will appear here.</div>';
+    return;
+  }
+  historyList.innerHTML = history.map((item, index) => `
+    <article class="history-item">
+      <div class="history-meta"><span>${escapeHtml(item.type || "OTHER")}</span><time>${escapeHtml(item.time || "")}</time></div>
+      <div class="history-question">${escapeHtml(item.question || "Detected question")}</div>
+      <div class="history-answer">${escapeHtml(item.answer || "")}</div>
+      <div class="history-actions"><button data-copy-index="${index}">Copy</button><button data-view-index="${index}">View</button></div>
+    </article>`).join("");
+}
+
+function escapeHtml(value) {
+  return String(value || "").replace(/[&<>"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch]));
+}
+
+function addHistory(answerText, type = "OTHER", questionText = "") {
+  history.unshift({
+    type,
+    question: questionText || "Detected question",
+    answer: answerText,
+    time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+  });
+  history = history.slice(0, 50);
+  saveHistory();
+  renderHistory();
+}
+
 function hidePopup() {
   popup.classList.remove("show");
   if (lastPopupTimer) clearTimeout(lastPopupTimer);
@@ -76,6 +120,7 @@ function hidePopup() {
 
 function showPopup(answerText) {
   const parsed = parseAnswer(answerText);
+  currentPopupText = parsed.answer || answerText.trim() || "No answer";
   popupAnswerEl.textContent = parsed.answer || answerText.trim() || "No answer";
   popupExplanationEl.textContent = parsed.explanation || "";
   popupExplanationEl.classList.toggle("hidden", !parsed.explanation);
@@ -88,9 +133,11 @@ function showPopup(answerText) {
 
 function parseAnswer(text) {
   const normalized = String(text || "").replace(/\r/g, "");
+  const typeMatch = normalized.match(/(?:\*\*)?TYPE(?:\*\*)?\s*:\s*([^\n]+)/i);
   const answerMatch = normalized.match(/(?:\*\*)?ANSWER(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?EXPLANATION(?:\*\*)?\s*:|$)/i);
   const explanationMatch = normalized.match(/(?:\*\*)?EXPLANATION(?:\*\*)?\s*:\s*([\s\S]*)$/i);
   return {
+    type: typeMatch ? typeMatch[1].trim().toUpperCase() : "OTHER",
     answer: answerMatch ? answerMatch[1].trim() : normalized.trim(),
     explanation: explanationMatch ? explanationMatch[1].trim() : ""
   };
@@ -129,6 +176,23 @@ clearBtn.onclick = () => {
 };
 resetBtn.onclick = resetSession;
 popupCloseBtn.onclick = hidePopup;
+popupCopyBtn.onclick = async () => {
+  try { await navigator.clipboard.writeText(currentPopupText); popupCopyBtn.textContent = "Copied ✓"; setTimeout(() => popupCopyBtn.textContent = "Copy answer", 1200); } catch { popupCopyBtn.textContent = "Copy failed"; }
+};
+clearHistoryBtn.onclick = () => { history = []; saveHistory(); renderHistory(); };
+historyList.addEventListener("click", async (event) => {
+  const copy = event.target.closest("[data-copy-index]");
+  const view = event.target.closest("[data-view-index]");
+  if (copy) {
+    const item = history[Number(copy.dataset.copyIndex)];
+    if (item) { try { await navigator.clipboard.writeText(item.answer); copy.textContent = "Copied ✓"; setTimeout(() => copy.textContent = "Copy", 1000); } catch {} }
+  }
+  if (view) {
+    const item = history[Number(view.dataset.viewIndex)];
+    if (item) { answerEl.textContent = item.answer; answerEl.className = "answer"; showPopup(item.answer); }
+  }
+});
+renderHistory();
 startBtn.onclick = startCamera;
 stopBtn.onclick = stopCamera;
 captureBtn.onclick = () => analyzeCurrentFrame(true);
@@ -479,9 +543,12 @@ async function analyzeCurrentFrame(manual, signature = null) {
       }
     }
 
-    answerEl.textContent = data.answer;
+    const parsed = parseAnswer(data.answer);
+    const answerForDisplay = parsed.answer || data.answer;
+    answerEl.textContent = answerForDisplay;
     answerEl.className = "answer";
     showPopup(data.answer);
+    addHistory(answerForDisplay, parsed.type, "Detected question — open the camera capture for the original text.");
 
     apiCount++;
     previousAnalyzedSignature = signature || visualSignature(new Uint8ClampedArray(ctx.getImageData(0, 0, DETECT_W, DETECT_H).data));

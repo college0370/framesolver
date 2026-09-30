@@ -25,6 +25,7 @@
           <div class="popup-label">AI ANSWER</div>
           <div id="popupAnswer" class="popup-answer">—</div>
           <div id="popupExplanation" class="popup-explanation"></div>
+          <button id="popupCopyBtn" class="popup-copy">Copy answer</button>
         </div>
         <canvas id="compareCanvas" hidden></canvas>
         <div id="cameraPlaceholder" class="placeholder">
@@ -52,6 +53,16 @@
       </div>
       <div class="meter"><div id="meterBar"></div></div>
       <p id="statusDetail">The phone detects question/text/number changes locally. AI is called only after a stable meaningful change. Groq is primary; Gemini is fallback.</p>
+    </section>
+
+    <section class="history-card">
+      <div class="answer-head">
+        <h2>History</h2>
+        <button id="clearHistoryBtn">Clear history</button>
+      </div>
+      <div id="historyList" class="history-list">
+        <div class="history-empty">Previous questions and answers will appear here.</div>
+      </div>
     </section>
 
     <section class="answer-card">
