@@ -29,8 +29,10 @@ const intervalValue = document.getElementById("intervalValue");
 let stream = null;
 let raf = null;
 let previous = null;
+let baseline = null;
 let changed = false;
 let stableCount = 0;
+let startupStableCount = 0;
 let lastAnalysis = 0;
 let busy = false;
 let previousAnalyzedSignature = null;
@@ -149,8 +151,10 @@ function stopCamera() {
   scanLine.classList.add("hidden");
 
   previous = null;
+  baseline = null;
   changed = false;
   stableCount = 0;
+  startupStableCount = 0;
 
   setBadge("READY", "idle");
   setStatus("Stopped", "Camera monitoring is off.");
@@ -160,20 +164,49 @@ function stopCamera() {
 function loop() {
   if (!stream) return;
 
-  if (video.readyState >= 2 && !busy) {
+  // Sample the camera continuously. We intentionally do not stop sampling
+  // while Gemini is busy, so a new question that appears during an analysis
+  // is not lost.
+  if (video.readyState >= 2) {
     ctx.drawImage(video, 0, 0, 64, 64);
     const data = ctx.getImageData(0, 0, 64, 64).data;
+    const current = new Uint8ClampedArray(data);
 
-    if (previous) {
-      const diff = meanDifference(previous, data);
+    if (!baseline) {
+      // The question may already be visible when the camera starts.
+      // Wait for a few stable samples, then analyze it automatically.
+      if (previous) {
+        const frameDiff = meanDifference(previous, current);
+        if (frameDiff < 5) startupStableCount++;
+        else startupStableCount = 0;
+      }
 
-      if (diff >= cfg.threshold) {
+      previous = current;
+      if (startupStableCount >= 8 && !busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
+        baseline = current;
+        startupStableCount = 0;
+        setStatus("Question detected", "Analyzing the initial stable frame…");
+        analyzeCurrentFrame(false, visualSignature(data));
+      }
+    } else {
+      // Compare against the last analyzed frame, not only the immediately
+      // previous camera frame. This catches gradual scrolling/transition
+      // changes that would otherwise never exceed the threshold in one frame.
+      const diffFromBaseline = meanDifference(baseline, current);
+      const frameDiff = previous ? meanDifference(previous, current) : 0;
+
+      if (!changed && diffFromBaseline >= cfg.threshold) {
         changed = true;
         stableCount = 0;
-        meterBar.style.width = "100%";
+        meterBar.style.width = "20%";
         setStatus("New visual change", "Waiting for the new question to stabilize…");
-      } else if (changed) {
-        stableCount++;
+      }
+
+      if (changed) {
+        // A low frame-to-frame difference means the new screen has settled.
+        if (frameDiff < 5) stableCount++;
+        else stableCount = 0;
+
         meterBar.style.width =
           `${Math.min(100, (stableCount / cfg.stableFrames) * 100)}%`;
 
@@ -187,20 +220,25 @@ function loop() {
               skippedCount++;
               updateStats();
               setStatus("Duplicate frame skipped", "No new question detected.");
-            } else {
+            } else if (!busy) {
+              // Lock this frame as the new baseline before the network call.
+              // This lets the detector keep watching while Gemini responds.
+              baseline = current;
               analyzeCurrentFrame(false, signature);
             }
           }
         }
       }
+
+      // If there is no active change, keep the last analyzed frame as the
+      // baseline. Do not overwrite it every frame.
     }
 
-    previous = new Uint8ClampedArray(data);
+    previous = current;
   }
 
   raf = requestAnimationFrame(loop);
 }
-
 function meanDifference(a, b) {
   let total = 0;
   for (let i = 0; i < a.length; i += 4) {

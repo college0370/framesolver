@@ -34,7 +34,7 @@ Put your Gemini key in `.env`:
 ```env
 GEMINI_API_KEY=YOUR_KEY
 PORT=8080
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.8-flash
 ```
 
 Start:
@@ -99,7 +99,7 @@ Use this for your own study and non-proctored practice/mock material. Do not use
 - There is **no question/session count limit** in the application.
 - The browser shows AI-call and skipped-frame counters for visibility; these counters can be reset without stopping the camera.
 - Captures are resized to a maximum width of 1024px and JPEG quality 0.70 to reduce upload size.
-- Default model is `gemini-2.5-flash-lite`; change `GEMINI_MODEL` if your API project uses another supported multimodal model.
+- Default model is `gemini-3.8-flash-lite`; change `GEMINI_MODEL` if your API project uses another supported multimodal model.
 - The minimum AI interval protects against accidental repeated calls when the camera view changes rapidly.
 
 Use this only with your own non-proctored practice/mock material.
