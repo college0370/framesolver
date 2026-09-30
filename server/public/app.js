@@ -5,6 +5,8 @@ const ctx = canvas.getContext("2d", { willReadFrequently: true });
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const captureBtn = document.getElementById("captureBtn");
+const diagnosticBtn = document.getElementById("diagnosticBtn");
+const diagnosticOutput = document.getElementById("diagnosticOutput");
 const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
 const popupCloseBtn = document.getElementById("popupCloseBtn");
@@ -258,6 +260,7 @@ renderHistory();
 startBtn.onclick = startCamera;
 stopBtn.onclick = stopCamera;
 captureBtn.onclick = () => analyzeCurrentFrame(true);
+diagnosticBtn.onclick = runAIDiagnostic;
 
 async function startCamera() {
   try {
@@ -289,6 +292,7 @@ async function startCamera() {
     startBtn.disabled = true;
     stopBtn.disabled = false;
     captureBtn.disabled = false;
+      diagnosticBtn.disabled = false;
     placeholder.classList.add("hidden");
     scanLine.classList.remove("hidden");
     hidePopup();
@@ -313,6 +317,7 @@ function stopCamera() {
   startBtn.disabled = false;
   stopBtn.disabled = true;
   captureBtn.disabled = true;
+    diagnosticBtn.disabled = true;
   placeholder.classList.remove("hidden");
   scanLine.classList.add("hidden");
   previous = null;
@@ -606,6 +611,70 @@ function captureCurrentFrame() {
   return { dataUrl, imageBase64: dataUrl.split(",")[1] };
 }
 
+
+function formatDiagnostics(items = []) {
+  return items.map((d, i) => {
+    const lines = [
+      `${i + 1}. ${d.provider} / ${d.model}`,
+      `HTTP: ${d.httpStatus ?? "?"}   elapsed: ${d.elapsedMs ?? "?"} ms`,
+      `message: ${d.errorMessage || "OK"}`
+    ];
+    if (d.errorType) lines.push(`type: ${d.errorType}`);
+    if (d.errorStatus) lines.push(`status: ${d.errorStatus}`);
+    if (d.errorCode) lines.push(`code: ${d.errorCode}`);
+    if (d.retryAfter) lines.push(`retry-after: ${d.retryAfter}`);
+    if (d.remainingRequests) lines.push(`remaining requests/day: ${d.remainingRequests}`);
+    if (d.remainingTokens) lines.push(`remaining tokens/min: ${d.remainingTokens}`);
+    if (d.resetTokens) lines.push(`token reset: ${d.resetTokens}`);
+    if (d.blockReason) lines.push(`block reason: ${d.blockReason}`);
+    return lines.join("\n");
+  }).join("\n\n");
+}
+
+function showDiagnostics(items, ok) {
+  diagnosticOutput.textContent = formatDiagnostics(items);
+  diagnosticOutput.className = `diagnostic-output ${ok ? "ok" : "bad"}`;
+}
+
+async function runAIDiagnostic() {
+  if (!stream || busy) return;
+  diagnosticBtn.disabled = true;
+  setBadge("TESTING AI", "busy");
+  setStatus("AI diagnostic", "Sending the current camera frame directly to Groq, then Gemini if needed…");
+  diagnosticOutput.textContent = "Running provider test…";
+  diagnosticOutput.className = "diagnostic-output";
+  try {
+    const capture = captureCurrentFrame();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
+    let response;
+    try {
+      response = await fetch("/api/diagnose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageBase64: capture.imageBase64, mimeType: "image/jpeg" }),
+        signal: controller.signal
+      });
+    } finally { clearTimeout(timeout); }
+    const data = await response.json().catch(() => ({}));
+    showDiagnostics(data.diagnostics || [], Boolean(data.ok));
+    if (data.ok) {
+      setBadge("DIAGNOSTIC OK", "live");
+      setStatus("AI diagnostic complete", data.summary || "Provider test succeeded.");
+    } else {
+      setBadge("DIAGNOSTIC FAILED", "busy");
+      setStatus("AI diagnostic failed", data.summary || "Both providers failed.");
+    }
+  } catch (err) {
+    diagnosticOutput.textContent = err?.name === "AbortError" ? "Diagnostic request timed out after 45 seconds." : (err?.message || String(err));
+    diagnosticOutput.className = "diagnostic-output bad";
+    setBadge("DIAGNOSTIC FAILED", "busy");
+    setStatus("AI diagnostic failed", "See the diagnostic box for the exact failure.");
+  } finally {
+    diagnosticBtn.disabled = !stream;
+  }
+}
+
 async function analyzeCurrentFrame(manual, signature = null) {
   if (!stream || busy) return;
   if (!manual && Date.now() - lastAnalysis < cfg.intervalMs) return;
@@ -648,7 +717,8 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
     }
 
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (!response.ok) { const e = new Error(data.error || `HTTP ${response.status}`); e.diagnostics = data.diagnostics || []; throw e; }
+    if (data.diagnostics) showDiagnostics(data.diagnostics, true);
 
     let answerText = String(data.answer || "");
     let parsed = parseAnswer(answerText);
@@ -699,8 +769,9 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
     meterBar.style.width = "0%";
   } catch (err) {
     setBadge("ERROR", "busy");
+    if (err?.diagnostics) showDiagnostics(err.diagnostics, false);
     const message = err?.name === "AbortError"
-      ? "AI timed out. Waiting for the next question."
+      ? "AI timed out. See the diagnostic box for provider details."
       : (err.message || "Try again.");
     setStatus("Analysis failed", message);
   } finally {

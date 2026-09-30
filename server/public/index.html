@@ -39,6 +39,7 @@
         <button id="startBtn" class="primary">Start Camera</button>
         <button id="stopBtn" class="secondary" disabled>Stop</button>
         <button id="captureBtn" class="secondary" disabled>Analyze Now</button>
+        <button id="diagnosticBtn" class="secondary" disabled>Test AI</button>
       </div>
     </section>
 
@@ -52,6 +53,7 @@
         <div><span>Skipped</span><strong id="skippedCount">0</strong></div>
       </div>
       <div class="meter"><div id="meterBar"></div></div>
+      <pre id="diagnosticOutput" class="diagnostic-output">No AI diagnostic run yet.</pre>
       <p id="statusDetail">The phone detects character/text/number changes locally. A new question is queued even if the previous answer is still processing, and the exact captured frame is analyzed. MCQ/English target ≤25s, numerical ≤40s, coding gets a longer verification window. Groq is primary; Gemini is fallback.</p>
     </section>
 

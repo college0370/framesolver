@@ -75,3 +75,8 @@ The v5.1 server uses a hard 20-second AI request timeout and the browser uses a 
 - Vision prompt explicitly ignores watermarks, logos, timestamps, UI labels, and email addresses that are unrelated to the question.
 - Normal Groq request is bounded to 16s; Gemini fallback is bounded to 9s, keeping normal analysis around a 25s window.
 - Coding keeps the longer verification path.
+
+
+## v7.0 Diagnostic build
+This build keeps the v5.9 AI request as the baseline and adds provider diagnostics.
+Use **Test AI** while the camera is running. It sends the current captured frame to Groq and, only if Groq fails, Gemini. The diagnostic box shows HTTP status, error message, rate-limit headers, elapsed time, and Gemini error status. Do not share API keys.

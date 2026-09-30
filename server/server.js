@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "5.9.0",
+    version: "7.0-diagnostic",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
@@ -79,7 +79,8 @@ async function fetchWithTimeout(url, options, ms) {
 }
 
 async function callGroq(imageBase64, mimeType) {
-  if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY is not configured");
+  if (!process.env.GROQ_API_KEY) throw Object.assign(new Error("GROQ_API_KEY is not configured"), { provider: "Groq", code: 0 });
+  const started = Date.now();
   const response = await fetchWithTimeout(
     "https://api.groq.com/openai/v1/chat/completions",
     {
@@ -105,16 +106,41 @@ async function callGroq(imageBase64, mimeType) {
     },
     16000
   );
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error?.message || `Groq HTTP ${response.status}`);
+  const rawText = await response.text();
+  let data = {};
+  try { data = rawText ? JSON.parse(rawText) : {}; } catch {}
+  const meta = {
+    provider: "Groq",
+    model: groqModel,
+    httpStatus: response.status,
+    ok: response.ok,
+    elapsedMs: Date.now() - started,
+    retryAfter: response.headers.get("retry-after"),
+    remainingRequests: response.headers.get("x-ratelimit-remaining-requests"),
+    remainingTokens: response.headers.get("x-ratelimit-remaining-tokens"),
+    resetRequests: response.headers.get("x-ratelimit-reset-requests"),
+    resetTokens: response.headers.get("x-ratelimit-reset-tokens"),
+    errorType: data?.error?.type || null,
+    errorMessage: data?.error?.message || null
+  };
+  if (!response.ok) {
+    const error = new Error(data?.error?.message || `Groq HTTP ${response.status}`);
+    Object.assign(error, meta);
+    throw error;
+  }
   const answer = data?.choices?.[0]?.message?.content?.trim();
-  if (!answer) throw new Error("Groq returned no answer");
-  return answer;
+  if (!answer) {
+    const error = new Error("Groq returned HTTP 200 but no answer content");
+    Object.assign(error, meta);
+    throw error;
+  }
+  return { answer, meta };
 }
 
 async function callGemini(imageBase64, mimeType, mode = "NORMAL") {
-  if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
+  if (!process.env.GEMINI_API_KEY) throw Object.assign(new Error("GEMINI_API_KEY is not configured"), { provider: "Gemini", code: 0 });
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
+  const started = Date.now();
   const response = await fetchWithTimeout(
     endpoint,
     {
@@ -137,14 +163,57 @@ async function callGemini(imageBase64, mimeType, mode = "NORMAL") {
     },
     mode === "CODING" ? 60000 : 9000
   );
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);
+  const rawText = await response.text();
+  let data = {};
+  try { data = rawText ? JSON.parse(rawText) : {}; } catch {}
+  const meta = {
+    provider: "Gemini",
+    model: geminiModel,
+    httpStatus: response.status,
+    ok: response.ok,
+    elapsedMs: Date.now() - started,
+    errorStatus: data?.error?.status || null,
+    errorCode: data?.error?.code || null,
+    errorMessage: data?.error?.message || null,
+    blockReason: data?.promptFeedback?.blockReason || null
+  };
+  if (!response.ok) {
+    const error = new Error(data?.error?.message || `Gemini HTTP ${response.status}`);
+    Object.assign(error, meta);
+    throw error;
+  }
   const answer = (data?.candidates?.[0]?.content?.parts || [])
     .map(part => part?.text || "")
     .join("")
     .trim();
-  if (!answer) throw new Error("Gemini returned no answer");
-  return answer;
+  if (!answer) {
+    const error = new Error(data?.promptFeedback?.blockReason ? `Gemini blocked the prompt: ${data.promptFeedback.blockReason}` : "Gemini returned HTTP 200 but no answer content");
+    Object.assign(error, meta);
+    throw error;
+  }
+  return { answer, meta };
+}
+
+function errorMeta(error, provider) {
+  return {
+    provider: error?.provider || provider,
+    model: error?.model || (provider === "Groq" ? groqModel : geminiModel),
+    httpStatus: error?.httpStatus || (error?.name === "AbortError" ? "TIMEOUT" : null),
+    elapsedMs: error?.elapsedMs || null,
+    retryAfter: error?.retryAfter || null,
+    remainingRequests: error?.remainingRequests || null,
+    remainingTokens: error?.remainingTokens || null,
+    resetRequests: error?.resetRequests || null,
+    resetTokens: error?.resetTokens || null,
+    errorType: error?.errorType || null,
+    errorStatus: error?.errorStatus || null,
+    errorCode: error?.errorCode || null,
+    errorMessage: error?.message || "Unknown error"
+  };
+}
+
+function diagnosticSummary(meta) {
+  return `${meta.provider}: HTTP ${meta.httpStatus ?? "?"} | ${meta.errorMessage || "OK"} | ${meta.elapsedMs ?? "?"}ms`;
 }
 
 app.post("/api/analyze", async (req, res) => {
@@ -152,37 +221,83 @@ app.post("/api/analyze", async (req, res) => {
   if (!imageBase64) return res.status(400).json({ error: "imageBase64 is required" });
 
   const started = Date.now();
+  const diagnostics = [];
   let groqError = "";
   if (!forceFallback) {
     try {
-      const answer = await callGroq(imageBase64, mimeType);
-      return res.json({ answer, provider: "Groq", model: groqModel, elapsedMs: Date.now() - started });
+      const result = await callGroq(imageBase64, mimeType);
+      diagnostics.push(result.meta);
+      return res.json({ answer: result.answer, provider: "Groq", model: groqModel, elapsedMs: Date.now() - started, diagnostics });
     } catch (error) {
-      groqError = error?.message || "Groq failed";
-      console.warn("Groq failed; trying Gemini fallback:", groqError);
+      const meta = errorMeta(error, "Groq");
+      diagnostics.push(meta);
+      groqError = meta.errorMessage;
+      console.warn("Groq failed; trying Gemini fallback:", meta);
     }
   } else {
-    groqError = "Groq unreadable response; forced Gemini fallback";
+    groqError = "Groq skipped by client";
   }
 
   try {
-    const answer = await callGemini(imageBase64, mimeType, mode);
-    return res.json({
-      answer,
-      provider: "Gemini fallback",
-      model: geminiModel,
-      elapsedMs: Date.now() - started
-    });
+    const result = await callGemini(imageBase64, mimeType, mode);
+    diagnostics.push(result.meta);
+    return res.json({ answer: result.answer, provider: "Gemini fallback", model: geminiModel, elapsedMs: Date.now() - started, diagnostics });
   } catch (error) {
-    const geminiError = error?.message || "Gemini fallback failed";
-    console.error("Both AI providers failed", { groqError, geminiError });
+    const meta = errorMeta(error, "Gemini");
+    diagnostics.push(meta);
+    const geminiError = meta.errorMessage;
+    console.error("Both AI providers failed", { groqError, geminiError, diagnostics });
     return res.status(503).json({
-      error: mode === "CODING"
-        ? "Coding analysis could not finish within the allowed verification window."
-        : "Analysis could not finish within the normal response window.",
+      error: "Both AI providers failed. See diagnostics for the exact API error.",
       groq: groqError,
       gemini: geminiError,
-      elapsedMs: Date.now() - started
+      elapsedMs: Date.now() - started,
+      diagnostics
+    });
+  }
+});
+
+app.post("/api/diagnose", async (req, res) => {
+  const { imageBase64, mimeType = "image/jpeg" } = req.body || {};
+  if (!imageBase64) return res.status(400).json({ error: "imageBase64 is required" });
+  const imageBytesApprox = Math.round((imageBase64.length * 3) / 4);
+  const started = Date.now();
+  const diagnostics = [];
+
+  try {
+    const result = await callGroq(imageBase64, mimeType);
+    diagnostics.push(result.meta);
+    return res.json({
+      ok: true,
+      summary: "Groq accepted the image and returned a response.",
+      imageBytesApprox,
+      elapsedMs: Date.now() - started,
+      diagnostics,
+      rawAnswerPreview: result.answer.slice(0, 1200)
+    });
+  } catch (error) {
+    diagnostics.push(errorMeta(error, "Groq"));
+  }
+
+  try {
+    const result = await callGemini(imageBase64, mimeType, "NORMAL");
+    diagnostics.push(result.meta);
+    return res.json({
+      ok: true,
+      summary: "Groq failed, but Gemini accepted the same image and returned a response.",
+      imageBytesApprox,
+      elapsedMs: Date.now() - started,
+      diagnostics,
+      rawAnswerPreview: result.answer.slice(0, 1200)
+    });
+  } catch (error) {
+    diagnostics.push(errorMeta(error, "Gemini"));
+    return res.status(503).json({
+      ok: false,
+      summary: "Both provider tests failed.",
+      imageBytesApprox,
+      elapsedMs: Date.now() - started,
+      diagnostics
     });
   }
 });
