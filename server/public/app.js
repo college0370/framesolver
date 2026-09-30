@@ -25,7 +25,6 @@ const skippedCountEl = document.getElementById("skippedCount");
 const thresholdInput = document.getElementById("threshold");
 const stableInput = document.getElementById("stableFrames");
 const intervalInput = document.getElementById("interval");
-
 const thresholdValue = document.getElementById("thresholdValue");
 const stableValue = document.getElementById("stableFramesValue");
 const intervalValue = document.getElementById("intervalValue");
@@ -34,6 +33,7 @@ let stream = null;
 let raf = null;
 let previous = null;
 let baseline = null;
+let candidate = null;
 let changed = false;
 let stableCount = 0;
 let startupStableCount = 0;
@@ -48,9 +48,9 @@ const DETECT_W = 160;
 const DETECT_H = 120;
 
 const cfg = {
-  threshold: 7.0,
-  stableFrames: 2,
-  intervalMs: 1200
+  threshold: 4.8,
+  stableFrames: 3,
+  intervalMs: 1500
 };
 
 function setStatus(text, detail = "") {
@@ -82,16 +82,14 @@ function showPopup(answerText) {
   popup.classList.remove("show");
   requestAnimationFrame(() => popup.classList.add("show"));
 
-  // Keep it visible long enough to read. It is still dismissible manually.
   if (lastPopupTimer) clearTimeout(lastPopupTimer);
-  lastPopupTimer = setTimeout(() => popup.classList.remove("show"), 18000);
+  lastPopupTimer = setTimeout(() => popup.classList.remove("show"), 15000);
 }
 
 function parseAnswer(text) {
   const normalized = String(text || "").replace(/\r/g, "");
   const answerMatch = normalized.match(/(?:\*\*)?ANSWER(?:\*\*)?\s*:\s*([\s\S]*?)(?=\n\s*(?:\*\*)?EXPLANATION(?:\*\*)?\s*:|$)/i);
   const explanationMatch = normalized.match(/(?:\*\*)?EXPLANATION(?:\*\*)?\s*:\s*([\s\S]*)$/i);
-
   return {
     answer: answerMatch ? answerMatch[1].trim() : normalized.trim(),
     explanation: explanationMatch ? explanationMatch[1].trim() : ""
@@ -113,7 +111,6 @@ function updateSettings() {
   cfg.threshold = Number(thresholdInput.value);
   cfg.stableFrames = Number(stableInput.value);
   cfg.intervalMs = Number(intervalInput.value) * 1000;
-
   thresholdValue.textContent = cfg.threshold;
   stableValue.textContent = cfg.stableFrames;
   intervalValue.textContent = Number(intervalInput.value);
@@ -152,9 +149,9 @@ async function startCamera() {
 
     canvas.width = DETECT_W;
     canvas.height = DETECT_H;
-
     previous = null;
     baseline = null;
+    candidate = null;
     changed = false;
     stableCount = 0;
     startupStableCount = 0;
@@ -169,8 +166,7 @@ async function startCamera() {
     hidePopup();
 
     setBadge("WATCHING", "live");
-    setStatus("Watching", "Watching for text, number, option, and blank changes automatically.");
-
+    setStatus("Watching", "Local detector is watching only the question/options area. No AI request yet.");
     loop();
   } catch (err) {
     setBadge("ERROR", "busy");
@@ -181,25 +177,22 @@ async function startCamera() {
 function stopCamera() {
   if (raf) cancelAnimationFrame(raf);
   raf = null;
-
   if (stream) {
     stream.getTracks().forEach(track => track.stop());
     stream = null;
   }
-
   video.srcObject = null;
   startBtn.disabled = false;
   stopBtn.disabled = true;
   captureBtn.disabled = true;
   placeholder.classList.remove("hidden");
   scanLine.classList.add("hidden");
-
   previous = null;
   baseline = null;
+  candidate = null;
   changed = false;
   stableCount = 0;
   startupStableCount = 0;
-
   hidePopup();
   setBadge("READY", "idle");
   setStatus("Stopped", "Camera monitoring is off.");
@@ -216,62 +209,70 @@ function loop() {
     if (!baseline) {
       if (previous) {
         const frameDiff = meanDifference(previous, current);
-        if (frameDiff < 1.8) startupStableCount++;
+        if (frameDiff < 1.35) startupStableCount++;
         else startupStableCount = 0;
       }
       previous = current;
 
-      // Analyze the first stable screen automatically.
-      if (startupStableCount >= 4 && !busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
+      if (startupStableCount >= 6 && !busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
         baseline = current;
         startupStableCount = 0;
-        setStatus("Question detected", "Analyzing the stable frame automatically…");
+        setStatus("Question detected", "Analyzing the first stable question automatically…");
         analyzeCurrentFrame(false, visualSignature(current));
       }
     } else {
       const metrics = changeMetrics(baseline, current);
       const frameDiff = previous ? meanDifference(previous, current) : 0;
 
-      // Trigger on either an obvious global change OR a localized text/number
-      // change. This is important for one-character changes and fill-in-the-blank
-      // questions where only a small part of the screen changes.
-      const meaningfulChange =
-        metrics.mean >= cfg.threshold ||
-        metrics.changedRatio >= 0.010 ||
-        metrics.changedBlocks >= 2;
+      // Localized text/number changes are the primary trigger. Broad changes
+      // across most blocks are treated as camera shake and ignored.
+      const localizedTextChange =
+        metrics.mean >= cfg.threshold &&
+        metrics.changedRatio >= 0.004 &&
+        metrics.changedBlocks >= 2 &&
+        metrics.changedBlocks <= 70;
+
+      const moderateQuestionChange =
+        metrics.changedRatio >= 0.012 &&
+        metrics.changedBlocks >= 3 &&
+        metrics.changedBlocks <= 95;
+
+      const meaningfulChange = localizedTextChange || moderateQuestionChange;
 
       if (!changed && meaningfulChange) {
         changed = true;
+        candidate = current;
         stableCount = 0;
         meterBar.style.width = "20%";
-        setStatus("Change detected", "Checking for a new question, option, number, or blank…");
+        setStatus("Question changed", "Waiting for the changed text/number/options to become stable…");
       }
 
       if (changed) {
-        // A low consecutive-frame difference means the changed screen has settled.
-        if (frameDiff < 1.9) stableCount++;
+        // Compare candidate and current: the new frame must stop moving before
+        // we send it. This prevents camera shake from producing requests.
+        const candidateDiff = candidate ? meanDifference(candidate, current) : 999;
+        if (candidateDiff < 1.55 && frameDiff < 1.7) stableCount++;
         else stableCount = 0;
 
+        candidate = current;
         meterBar.style.width = `${Math.min(100, (stableCount / cfg.stableFrames) * 100)}%`;
 
         if (stableCount >= cfg.stableFrames) {
           const signature = visualSignature(current);
+          changed = false;
+          stableCount = 0;
+          candidate = null;
+          baseline = current;
+          meterBar.style.width = "0%";
 
-          if (!busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
-            changed = false;
-            stableCount = 0;
-
-            if (signature === previousAnalyzedSignature) {
-              skippedCount++;
-              updateStats();
-              baseline = current;
-              setStatus("Duplicate skipped", "Waiting for the next meaningful change…");
-            } else {
-              baseline = current;
-              analyzeCurrentFrame(false, signature);
-            }
+          if (signature === previousAnalyzedSignature) {
+            skippedCount++;
+            updateStats();
+            setStatus("Same question skipped", "No AI request — waiting for the next meaningful text change.");
+          } else if (!busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
+            analyzeCurrentFrame(false, signature);
           } else {
-            setStatus("New question ready", "Waiting briefly for the AI request slot…");
+            setStatus("New question ready", "AI request is already in progress; no duplicate request will be sent.");
           }
         }
       }
@@ -288,19 +289,20 @@ function grayAt(data, x, y) {
   return (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
 }
 
+function inQuestionRegion(x, y) {
+  // Ignore the extreme camera edges and the bottom button/toolbar area.
+  return x >= 8 && x <= 152 && y >= 10 && y <= 92;
+}
+
 function meanDifference(a, b) {
   let total = 0;
   let count = 0;
-
-  for (let y = 0; y < DETECT_H; y += 2) {
-    // Question/options tend to be in the upper/middle area. Still sample the
-    // whole frame so scrolling and layout changes are caught.
-    const weight = y < 92 ? 1.35 : 0.75;
-    for (let x = 0; x < DETECT_W; x += 2) {
+  for (let y = 10; y <= 92; y += 2) {
+    for (let x = 8; x <= 152; x += 2) {
       const ag = grayAt(a, x, y);
       const bg = grayAt(b, x, y);
-      total += Math.abs(ag - bg) * weight;
-      count += weight;
+      total += Math.abs(ag - bg);
+      count++;
     }
   }
   return total / count;
@@ -312,39 +314,36 @@ function changeMetrics(a, b) {
   let changedPixels = 0;
   let changedBlocks = 0;
 
-  // Block comparison catches localized text changes that barely move the
-  // frame-wide mean difference.
-  for (let by = 0; by < DETECT_H; by += 8) {
-    for (let bx = 0; bx < DETECT_W; bx += 8) {
+  for (let by = 10; by < 92; by += 6) {
+    for (let bx = 8; bx < 152; bx += 6) {
       let blockDiff = 0;
       let blockCount = 0;
-
-      for (let y = by; y < Math.min(by + 8, DETECT_H); y += 1) {
-        for (let x = bx; x < Math.min(bx + 8, DETECT_W); x += 1) {
+      for (let y = by; y < Math.min(by + 6, 93); y++) {
+        for (let x = bx; x < Math.min(bx + 6, 153); x++) {
+          if (!inQuestionRegion(x, y)) continue;
           const d = Math.abs(grayAt(a, x, y) - grayAt(b, x, y));
           blockDiff += d;
           blockCount++;
           total += d;
           count++;
-          if (d >= 18) changedPixels++;
+          if (d >= 15) changedPixels++;
         }
       }
-
-      if (blockDiff / blockCount >= 5.5) changedBlocks++;
+      if (blockCount && blockDiff / blockCount >= 4.0) changedBlocks++;
     }
   }
 
   return {
-    mean: total / count,
-    changedRatio: changedPixels / count,
+    mean: count ? total / count : 0,
+    changedRatio: count ? changedPixels / count : 0,
     changedBlocks
   };
 }
 
 function visualSignature(data) {
   let signature = "";
-  for (let y = 0; y < DETECT_H; y += 5) {
-    for (let x = 0; x < DETECT_W; x += 5) {
+  for (let y = 10; y <= 92; y += 5) {
+    for (let x = 8; x <= 152; x += 5) {
       signature += Math.floor(grayAt(data, x, y) / 32).toString(16);
     }
   }
@@ -358,24 +357,24 @@ async function analyzeCurrentFrame(manual, signature = null) {
   busy = true;
   lastAnalysis = Date.now();
   setBadge("ANALYZING", "busy");
-  setStatus("Analyzing", "Reading the changed question and finding the direct answer…");
+  setStatus("Analyzing", "One AI request — reading the changed question…");
 
   try {
     const capture = document.createElement("canvas");
-    const maxWidth = 1024;
+    // 960px is enough for typical phone-camera question text while keeping
+    // upload size and vision latency down.
+    const maxWidth = 900;
     const scale = Math.min(1, maxWidth / video.videoWidth);
-
     capture.width = Math.round(video.videoWidth * scale);
     capture.height = Math.round(video.videoHeight * scale);
 
     const c = capture.getContext("2d");
     c.drawImage(video, 0, 0, capture.width, capture.height);
-
-    const dataUrl = capture.toDataURL("image/jpeg", 0.68);
+    const dataUrl = capture.toDataURL("image/jpeg", 0.58);
     const imageBase64 = dataUrl.split(",")[1];
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 14000);
+    const timeout = setTimeout(() => controller.abort(), 22000);
     let response;
     try {
       response = await fetch("/api/analyze", {
@@ -400,11 +399,13 @@ async function analyzeCurrentFrame(manual, signature = null) {
     updateStats();
 
     setBadge("ANSWER READY", "live");
-    setStatus("Answer ready", "Popup shown. Watching for the next text/number/option change.");
+    setStatus("Answer ready", "Popup shown. Local detector is watching for the next real question/text change.");
     meterBar.style.width = "0%";
   } catch (err) {
     setBadge("ERROR", "busy");
-    const message = err?.name === "AbortError" ? "AI took too long. Waiting for the next stable frame." : (err.message || "Try again.");
+    const message = err?.name === "AbortError"
+      ? "AI timed out. No repeated request was sent; waiting for the next question."
+      : (err.message || "Try again.");
     setStatus("Analysis failed", message);
   } finally {
     busy = false;

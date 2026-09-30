@@ -12,7 +12,7 @@
     <header>
       <div>
         <h1>FrameSolve AI</h1>
-        <p>Live camera practice assistant</p>
+        <p>Fast live camera practice assistant</p>
       </div>
       <span id="stateBadge" class="badge idle">READY</span>
     </header>
@@ -51,7 +51,7 @@
         <div><span>Skipped</span><strong id="skippedCount">0</strong></div>
       </div>
       <div class="meter"><div id="meterBar"></div></div>
-      <p id="statusDetail">The app waits for a meaningful visual change before sending a frame.</p>
+      <p id="statusDetail">The phone detects question/text changes locally. AI is called only after a stable change.</p>
     </section>
 
     <section class="answer-card">
@@ -66,8 +66,8 @@
       <summary>Detection settings</summary>
       <label>
         Sensitivity
-        <input id="threshold" type="range" min="5" max="40" step="1" value="12">
-        <span id="thresholdValue">12</span>
+        <input id="threshold" type="range" min="3" max="40" step="0.5" value="4.8">
+        <span id="thresholdValue">4.8</span>
       </label>
       <label>
         Stable frames
@@ -76,8 +76,8 @@
       </label>
       <label>
         Minimum AI interval (seconds)
-        <input id="interval" type="range" min="2" max="20" step="0.5" value="2.5">
-        <span id="intervalValue">2.5</span>
+        <input id="interval" type="range" min="1" max="20" step="0.5" value="1.5">
+        <span id="intervalValue">1.5</span>
       </label>
     </details>
 
