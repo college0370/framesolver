@@ -1,19 +1,26 @@
-# FrameSolve Web v8.0
+# FrameSolve AI
 
-Question-content detector version.
+Mobile-first camera practice assistant for **your own non-proctored mock/practice material**.
 
-## Detection flow
-- Camera starts and establishes the first question.
-- A cheap local visual trigger checks the question region.
-- OCR runs only when the visual trigger suggests content changed.
-- OCR text is normalized into a question fingerprint.
-- If the fingerprint is the same, no AI request is sent.
-- If the fingerprint is different, the new question is captured and sent to the existing AI pipeline.
-- No 7/10/20-second handoff timer is used.
-- The answer popup remains the large centered answer-only popup.
-- Status reports detection/AI errors.
-- Answer section comes before History; History exposes only Copy all history and Clear history.
+## Detection architecture
+
+- Camera is sampled continuously with a cheap local visual trigger.
+- The visual trigger is **not** the question identity; it only wakes OCR.
+- OCR builds a normalized question fingerprint from the visible question/options/code area.
+- Fingerprint detection is capped at an **8.5 second OCR budget**, keeping the change-detection target below 10 seconds.
+- Phone movement or camera shake can trigger OCR, but if the fingerprint is still the same, no AI request is made.
+- A genuinely different fingerprint immediately captures one high-quality frame and starts AI analysis.
+- AI analysis is **independent of the 10-second detector budget**. It is not cancelled just because detection is fast.
+- Groq is attempted first; Gemini is the fallback in the current server implementation.
+- The client protects against stale AI responses overwriting a newer detected question.
+- There is no manual Analyze Now button.
 
 ## Deploy
-Keep Render Root Directory as `server`, Build Command `npm install`, Start Command `npm start`.
-Keep existing environment variables. Tesseract.js is loaded in the browser from jsDelivr.
+
+Render root directory: `server`
+
+Build command: `npm install`
+
+Start command: `npm start`
+
+Keep provider API keys server-side in Render environment variables.

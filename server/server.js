@@ -103,7 +103,7 @@ async function callGroq(imageBase64, mimeType) {
         stream: false
       })
     },
-    16000
+    45000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Groq HTTP ${response.status}`);
@@ -135,7 +135,7 @@ async function callGemini(imageBase64, mimeType, mode = "NORMAL") {
         }
       })
     },
-    mode === "CODING" ? 60000 : 9000
+    45000
   );
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || `Gemini HTTP ${response.status}`);

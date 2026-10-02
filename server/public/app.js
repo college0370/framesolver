@@ -4,7 +4,6 @@ const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
-const captureBtn = document.getElementById("captureBtn");
 const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
 const popupCloseBtn = document.getElementById("popupCloseBtn");
@@ -59,14 +58,15 @@ const DETECT_W = 192;
 const DETECT_H = 144;
 const CAPTURE_MAX_W = 1600;
 const CAPTURE_JPEG_QUALITY = 0.92;
-const DETECT_CHECK_MS = 450;
-const OCR_COOLDOWN_MS = 1200;
+const DETECT_CHECK_MS = 300;
+const OCR_COOLDOWN_MS = 650;
+const OCR_DETECTION_BUDGET_MS = 8500;
 const QUESTION_ROI = { top: 0.05, bottom: 0.86, left: 0.03, right: 0.97 };
 
 const cfg = {
   threshold: 2.2,
   stableFrames: 2,
-  intervalMs: 900
+  intervalMs: 1000
 };
 
 function setStatus(text, detail = "") {
@@ -274,7 +274,6 @@ copyHistoryBtn.onclick = async () => {
 renderHistory();
 startBtn.onclick = startCamera;
 stopBtn.onclick = stopCamera;
-captureBtn.onclick = () => analyzeCurrentFrame(true);
 
 async function startCamera() {
   try {
@@ -308,13 +307,13 @@ async function startCamera() {
 
     startBtn.disabled = true;
     stopBtn.disabled = false;
-    captureBtn.disabled = false;
     placeholder.classList.add("hidden");
     scanLine.classList.remove("hidden");
     hidePopup();
 
     setBadge("WATCHING", "live");
-    setStatus("Watching", "Local detector is watching only the question/options area. No AI request yet.");
+    setStatus("Watching", "Fast detector is active. Preparing OCR in the background; AI will run independently after a new fingerprint is confirmed.");
+    ensureOCRWorker().catch(() => {});
     loop();
   } catch (err) {
     setBadge("ERROR", "busy");
@@ -332,7 +331,6 @@ function stopCamera() {
   video.srcObject = null;
   startBtn.disabled = false;
   stopBtn.disabled = true;
-  captureBtn.disabled = true;
   placeholder.classList.remove("hidden");
   scanLine.classList.add("hidden");
   previous = null;
@@ -419,9 +417,13 @@ function contentChangeTrigger(a, b) {
 async function confirmQuestionWithOCR(firstQuestion) {
   if (ocrBusy || !stream) return;
   ocrBusy = true;
+  const startedAt = performance.now();
   try {
     const image = captureQuestionRegionForOCR();
-    const text = await runOCR(image);
+    const text = await Promise.race([
+      runOCR(image),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Fingerprint OCR exceeded the 8.5 second detection budget.")), OCR_DETECTION_BUDGET_MS))
+    ]);
     const fingerprint = buildQuestionFingerprint(text);
 
     if (!fingerprint || fingerprint.length < 12) {
@@ -472,20 +474,33 @@ async function confirmQuestionWithOCR(firstQuestion) {
   }
 }
 
-function buildQuestionFingerprint(text) {
-  return normalizeOCRText(text);
-}
-
 function normalizeOCRText(text) {
   return String(text || "")
     .toLowerCase()
+    .replace(/[|¦]/g, "i")
     .replace(/[^a-z0-9%+\-*/=<>?.,:()\[\]\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
+function buildQuestionFingerprint(text) {
+  const normalized = normalizeOCRText(text);
+  if (!normalized) return "";
+
+  // Keep question text, numbers, option markers and code symbols.
+  // Removing only very common filler words makes the fingerprint shorter and
+  // faster to compare while retaining the information that identifies a question.
+  const stop = new Set([
+    "the", "a", "an", "is", "are", "was", "were", "to", "of", "in", "on",
+    "for", "and", "or", "with", "from", "by", "be", "as", "at", "this", "that"
+  ]);
+  const tokens = normalized.split(" ").filter(Boolean);
+  const important = tokens.filter(t => !stop.has(t) || /\d|%|[=<>+*/-]/.test(t));
+  return important.join(" ");
+}
+
 function tokenSet(text) {
-  return new Set(normalizeOCRText(text).split(" ").filter(x => x.length > 1));
+  return new Set(buildQuestionFingerprint(text).split(" ").filter(x => x.length > 1));
 }
 
 function isSameQuestionFingerprint(a, b) {
@@ -496,9 +511,7 @@ function isSameQuestionFingerprint(a, b) {
   let common = 0;
   for (const t of A) if (B.has(t)) common++;
   const similarity = common / Math.max(A.size, B.size);
-  // Also protect against a completely different question with a few common
-  // words such as "the", "is", "of", etc.
-  return similarity >= 0.82;
+  return similarity >= 0.78;
 }
 
 async function ensureOCRWorker() {

@@ -39,7 +39,6 @@
       <div class="controls">
         <button id="startBtn" class="primary">Start Camera</button>
         <button id="stopBtn" class="secondary" disabled>Stop</button>
-        <button id="captureBtn" class="secondary" disabled>Analyze Now</button>
       </div>
     </section>
 
@@ -53,7 +52,7 @@
         <div><span>Skipped</span><strong id="skippedCount">0</strong></div>
       </div>
       <div class="meter"><div id="meterBar"></div></div>
-      <p id="statusDetail">The detector watches for actual question-content changes. A visual change is only a trigger; OCR confirms whether the question itself is different before an AI request is sent. Groq is primary; Gemini is fallback.</p>
+      <p id="statusDetail">Fast local detection watches for question-content changes. OCR builds the question fingerprint within the detection window; AI runs independently and is never cancelled just because detection is fast. Groq is primary; Gemini is fallback.</p>
     </section>
 
     <section class="answer-card">
