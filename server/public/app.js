@@ -19,8 +19,6 @@ const answerEl = document.getElementById("answer");
 const popupAnswerEl = document.getElementById("popupAnswer");
 const popupExplanationEl = document.getElementById("popupExplanation");
 const popup = document.getElementById("answerPopup");
-const nextQuestionCountdown = document.getElementById("nextQuestionCountdown");
-const nextQuestionSeconds = document.getElementById("nextQuestionSeconds");
 const badge = document.getElementById("stateBadge");
 const meterBar = document.getElementById("meterBar");
 const placeholder = document.getElementById("cameraPlaceholder");
@@ -39,38 +37,35 @@ let stream = null;
 let raf = null;
 let previous = null;
 let baseline = null;
-let candidate = null;
-let changed = false;
-let stableCount = 0;
-let startupStableCount = 0;
-let lastAnalysis = 0;
 let busy = false;
 let previousAnalyzedSignature = null;
+let previousQuestionFingerprint = "";
 let apiCount = 0;
 let skippedCount = 0;
 let lastPopupTimer = null;
 let currentPopupText = "";
 let pendingCapture = null;
 let pendingSignature = null;
-let pendingQuestionVersion = 0;
 let analysisVersion = 0;
 let watchState = "STARTUP";
-let handoffTimer = null;
-let handoffReference = null;
-const HANDOFF_SECONDS = 10;
-const DETECT_CHECK_MS = 250;
 let lastDetectCheck = 0;
-let handoffRemaining = HANDOFF_SECONDS;
+let lastVisualTrigger = 0;
+let ocrBusy = false;
+let ocrWorker = null;
+let ocrReadyPromise = null;
 let history = loadHistory();
 
 const DETECT_W = 192;
 const DETECT_H = 144;
 const CAPTURE_MAX_W = 1600;
 const CAPTURE_JPEG_QUALITY = 0.92;
+const DETECT_CHECK_MS = 450;
+const OCR_COOLDOWN_MS = 1200;
+const QUESTION_ROI = { top: 0.05, bottom: 0.86, left: 0.03, right: 0.97 };
 
 const cfg = {
-  threshold: 1.8,
-  stableFrames: 3,
+  threshold: 2.2,
+  stableFrames: 2,
   intervalMs: 900
 };
 
@@ -175,50 +170,14 @@ function addHistory(answerText, type = "OTHER", questionText = "", options = [],
 }
 
 function hideNextQuestionCountdown() {
-  if (handoffTimer) clearInterval(handoffTimer);
-  handoffTimer = null;
-  handoffRemaining = HANDOFF_SECONDS;
-  if (nextQuestionCountdown) nextQuestionCountdown.classList.add("hidden");
+  // Countdown-based handoff was intentionally removed. Detection now stays live.
 }
 
-function startNextQuestionCountdown(referenceFrame) {
-  hideNextQuestionCountdown();
-  handoffReference = referenceFrame ? new Uint8ClampedArray(referenceFrame) : null;
-  handoffRemaining = HANDOFF_SECONDS;
-  nextQuestionSeconds.textContent = handoffRemaining;
-  nextQuestionCountdown.classList.remove("hidden");
+function startNextQuestionCountdown() {
+  // Compatibility shim for the answer flow; no timer is used anymore.
   watchState = "WATCH_NEXT";
-  // The countdown is NOT a blind 10-second delay. We start watching immediately
-  // so a real question change can be detected quickly. If nothing changes for
-  // 10 seconds, we simply refresh the reference and restart the countdown while
-  // keeping the same answer visible.
-  baseline = handoffReference ? new Uint8ClampedArray(handoffReference) : captureDetectorFrame();
-  previous = baseline ? new Uint8ClampedArray(baseline) : previous;
-  candidate = null;
-  changed = false;
-  stableCount = 0;
-  lastDetectCheck = 0;
   setBadge("WATCHING NEXT", "live");
-  setStatus("Watching for next question", `Checking the screen now. If nothing changes in ${HANDOFF_SECONDS} seconds, the same answer stays and the timer restarts.`);
-
-  handoffTimer = setInterval(() => {
-    handoffRemaining -= 1;
-    nextQuestionSeconds.textContent = Math.max(0, handoffRemaining);
-    if (handoffRemaining <= 0) {
-      // If a question change had already started, do not overwrite it.
-      if (changed || watchState !== "WATCH_NEXT") return;
-      const reference = captureDetectorFrame();
-      baseline = reference;
-      previous = reference ? new Uint8ClampedArray(reference) : previous;
-      candidate = null;
-      stableCount = 0;
-      lastDetectCheck = 0;
-      meterBar.style.width = "0%";
-      handoffRemaining = HANDOFF_SECONDS;
-      nextQuestionSeconds.textContent = HANDOFF_SECONDS;
-      setStatus("Still on same question", `No meaningful change detected. Keeping the current answer and restarting the ${HANDOFF_SECONDS}-second watch cycle.`);
-    }
-  }, 1000);
+  setStatus("Watching for new question", "Waiting for the question content to change. No timer is used.");
 }
 
 function hidePopup() {
@@ -264,13 +223,13 @@ function resetSession() {
   apiCount = 0;
   skippedCount = 0;
   previousAnalyzedSignature = null;
+  previousQuestionFingerprint = "";
   pendingCapture = null;
   pendingSignature = null;
   updateStats();
   answerEl.textContent = "No answer yet.";
   answerEl.className = "answer empty";
   hidePopup();
-  hideNextQuestionCountdown();
   watchState = stream ? "STARTUP" : "STARTUP";
   setStatus(stream ? "Watching" : "Ready", "Detection counters reset.");
 }
@@ -344,8 +303,8 @@ async function startCamera() {
     pendingCapture = null;
     pendingSignature = null;
     watchState = "STARTUP";
-    hideNextQuestionCountdown();
-    handoffReference = null;
+    previousQuestionFingerprint = "";
+    lastVisualTrigger = 0;
 
     startBtn.disabled = true;
     stopBtn.disabled = false;
@@ -384,8 +343,6 @@ function stopCamera() {
   startupStableCount = 0;
   pendingCapture = null;
   pendingSignature = null;
-  hideNextQuestionCountdown();
-  handoffReference = null;
   watchState = "STOPPED";
   hidePopup();
   setBadge("READY", "idle");
@@ -395,106 +352,197 @@ function stopCamera() {
 
 function loop() {
   if (!stream) return;
-
   if (video.readyState >= 2) {
     ctx.drawImage(video, 0, 0, DETECT_W, DETECT_H);
     const current = new Uint8ClampedArray(ctx.getImageData(0, 0, DETECT_W, DETECT_H).data);
-
-    if (watchState === "HANDOFF") {
-      // Deliberately do not classify frames during the 10-second handoff.
-      previous = current;
-      raf = requestAnimationFrame(loop);
-      return;
-    }
+    const now = performance.now();
 
     if (!baseline) {
-      if (previous) {
-        const frameDiff = meanDifference(previous, current);
-        if (frameDiff < 1.35) startupStableCount++;
-        else startupStableCount = 0;
-      }
-      previous = current;
-
-      if (startupStableCount >= 4 && !busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
-        baseline = current;
-        startupStableCount = 0;
-        watchState = "ANALYZING_FIRST";
-        setStatus("Question detected", "Capturing the first stable question…");
-        analyzeCapturedFrame(captureCurrentFrame(), false, visualSignature(current));
-      }
-    } else if (watchState === "WATCH_NEXT") {
-      const now = performance.now();
-      if (now - lastDetectCheck < DETECT_CHECK_MS) {
-        raf = requestAnimationFrame(loop);
-        return;
-      }
-      lastDetectCheck = now;
-
-      // Fast first-pass comparison. Only if it crosses the threshold do we
-      // run the more expensive alignment check. This makes Q1 -> Q2 detection
-      // much more responsive on phones.
-      const quickDiff = meanDifference(baseline, current);
-      if (!changed && quickDiff >= 2.2) {
-        const aligned = alignedChangeMetrics(baseline, current);
-        const meaningfulChange =
-          aligned.residualMean >= Math.max(1.05, cfg.threshold * 0.55) &&
-          aligned.changedRatio >= 0.00035 &&
-          aligned.changedBlocks >= 1;
-
-        if (meaningfulChange) {
-          changed = true;
-          hidePopup();
-          hideNextQuestionCountdown();
-          answerEl.textContent = "New question detected…";
-          answerEl.className = "answer empty";
-          candidate = current;
-          stableCount = 0;
-          meterBar.style.width = "15%";
-          setStatus("Question changed", "Confirming the new frame…");
+      // Establish the first question once the camera is reasonably stable.
+      if (!previous || meanDifference(previous, current) < 1.5) {
+        if (!ocrBusy && !busy && now - lastDetectCheck >= DETECT_CHECK_MS) {
+          lastDetectCheck = now;
+          baseline = current;
+          watchState = "CONFIRMING_FIRST";
+          setBadge("READING", "busy");
+          setStatus("Reading first question", "Extracting the visible question text once to create its fingerprint…");
+          confirmQuestionWithOCR(true);
         }
       }
-
-      if (changed) {
-        const candidateDiff = candidate ? meanDifference(candidate, current) : 999;
-        const frameDiff = previous ? meanDifference(previous, current) : 0;
-        if (candidateDiff < 2.0 && frameDiff < 2.2) stableCount++;
-        else stableCount = 0;
-
-        candidate = current;
-        meterBar.style.width = `${Math.min(100, (stableCount / Math.max(2, cfg.stableFrames)) * 100)}%`;
-
-        if (stableCount >= Math.max(2, cfg.stableFrames)) {
-          const signature = visualSignature(current);
-          const capture = captureCurrentFrame();
-          changed = false;
-          stableCount = 0;
-          candidate = null;
-          baseline = current;
-          previous = current;
-          meterBar.style.width = "0%";
-
-          if (signature === previousAnalyzedSignature) {
-            skippedCount++;
-            updateStats();
-            setStatus("Same question", "No new answer needed. Continuing to watch.");
-          } else if (!busy && Date.now() - lastAnalysis >= cfg.intervalMs) {
-            watchState = "ANALYZING_NEXT";
-            analyzeCapturedFrame(capture, false, signature);
-          } else {
-            pendingCapture = capture;
-            pendingSignature = signature;
-            pendingQuestionVersion++;
-            watchState = "QUEUED";
-            setStatus("Question queued", "Waiting for the current AI request to finish.");
+      previous = current;
+    } else if (watchState === "WATCH_NEXT") {
+      if (now - lastDetectCheck >= DETECT_CHECK_MS && !ocrBusy) {
+        lastDetectCheck = now;
+        const trigger = contentChangeTrigger(baseline, current);
+        if (trigger.score >= 1) {
+          if (now - lastVisualTrigger >= OCR_COOLDOWN_MS) {
+            lastVisualTrigger = now;
+            setBadge("CHECKING", "busy");
+            setStatus("Possible question change", "Checking the actual question text before sending anything to AI…");
+            baseline = current;
+            confirmQuestionWithOCR(false);
           }
         }
       }
-
       previous = current;
     }
   }
-
   raf = requestAnimationFrame(loop);
+}
+
+function contentChangeTrigger(a, b) {
+  // This is only a cheap trigger, not the question identity. It uses edge/text
+  // structure in the question ROI so small camera movement is less important.
+  // OCR is the actual content confirmation step.
+  let edgeDiff = 0;
+  let count = 0;
+  const x0 = Math.floor(DETECT_W * QUESTION_ROI.left);
+  const x1 = Math.floor(DETECT_W * QUESTION_ROI.right);
+  const y0 = Math.floor(DETECT_H * QUESTION_ROI.top);
+  const y1 = Math.floor(DETECT_H * QUESTION_ROI.bottom);
+  for (let y = y0 + 1; y < y1 - 1; y += 2) {
+    for (let x = x0 + 1; x < x1 - 1; x += 2) {
+      const a0 = grayAt(a, x, y);
+      const b0 = grayAt(b, x, y);
+      const ax = Math.abs(grayAt(a, x + 1, y) - grayAt(a, x - 1, y));
+      const bx = Math.abs(grayAt(b, x + 1, y) - grayAt(b, x - 1, y));
+      const ay = Math.abs(grayAt(a, x, y + 1) - grayAt(a, x, y - 1));
+      const by = Math.abs(grayAt(b, x, y + 1) - grayAt(b, x, y - 1));
+      edgeDiff += Math.abs((ax + ay) - (bx + by)) + Math.abs(a0 - b0) * 0.18;
+      count++;
+    }
+  }
+  const mean = count ? edgeDiff / count : 0;
+  return { score: mean >= 3.2 ? 1 : 0, mean };
+}
+
+async function confirmQuestionWithOCR(firstQuestion) {
+  if (ocrBusy || !stream) return;
+  ocrBusy = true;
+  try {
+    const image = captureQuestionRegionForOCR();
+    const text = await runOCR(image);
+    const fingerprint = buildQuestionFingerprint(text);
+
+    if (!fingerprint || fingerprint.length < 12) {
+      if (firstQuestion) {
+        watchState = "WATCH_NEXT";
+        setBadge("WATCHING", "live");
+        setStatus("Question detected", "OCR could not fully read the text, so the first captured frame will be sent to AI.");
+        await analyzeCapturedFrame(captureCurrentFrame(), false, visualSignature(baseline));
+      } else {
+        watchState = "WATCH_NEXT";
+        setBadge("WATCHING NEXT", "live");
+        setStatus("Change not confirmed", "The frame moved, but the question text did not read clearly enough. Continuing to watch.");
+      }
+      return;
+    }
+
+    if (firstQuestion) {
+      previousQuestionFingerprint = fingerprint;
+      watchState = "ANALYZING_FIRST";
+      setStatus("Question detected", "New question fingerprint created. Sending the captured question to AI…");
+      await analyzeCapturedFrame(captureCurrentFrame(), false, visualSignature(baseline));
+      return;
+    }
+
+    if (isSameQuestionFingerprint(previousQuestionFingerprint, fingerprint)) {
+      skippedCount++;
+      updateStats();
+      watchState = "WATCH_NEXT";
+      setBadge("WATCHING NEXT", "live");
+      setStatus("Same question", "The screen changed, but the actual question content is the same. No AI request sent.");
+      return;
+    }
+
+    previousQuestionFingerprint = fingerprint;
+    hidePopup();
+    answerEl.textContent = "New question detected…";
+    answerEl.className = "answer empty";
+    watchState = "ANALYZING_NEXT";
+    setBadge("NEW QUESTION", "busy");
+    setStatus("New question detected", "Question content changed. Capturing and sending it to AI…");
+    await analyzeCapturedFrame(captureCurrentFrame(), false, fingerprint);
+  } catch (err) {
+    watchState = "WATCH_NEXT";
+    setBadge("WATCHING", "live");
+    setStatus("Question check failed", err.message || "Continuing to watch for a readable question change.");
+  } finally {
+    ocrBusy = false;
+  }
+}
+
+function buildQuestionFingerprint(text) {
+  return normalizeOCRText(text);
+}
+
+function normalizeOCRText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9%+\-*/=<>?.,:()\[\]\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenSet(text) {
+  return new Set(normalizeOCRText(text).split(" ").filter(x => x.length > 1));
+}
+
+function isSameQuestionFingerprint(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const A = tokenSet(a), B = tokenSet(b);
+  if (!A.size || !B.size) return false;
+  let common = 0;
+  for (const t of A) if (B.has(t)) common++;
+  const similarity = common / Math.max(A.size, B.size);
+  // Also protect against a completely different question with a few common
+  // words such as "the", "is", "of", etc.
+  return similarity >= 0.82;
+}
+
+async function ensureOCRWorker() {
+  if (!window.Tesseract) throw new Error("OCR engine is still loading. Try again in a moment.");
+  if (ocrReadyPromise) return ocrReadyPromise;
+  ocrReadyPromise = (async () => {
+    ocrWorker = await Tesseract.createWorker("eng");
+    return ocrWorker;
+  })();
+  return ocrReadyPromise;
+}
+
+function captureQuestionRegionForOCR() {
+  const sourceW = video.videoWidth || 1280;
+  const sourceH = video.videoHeight || 720;
+  const sx = Math.round(sourceW * QUESTION_ROI.left);
+  const sy = Math.round(sourceH * QUESTION_ROI.top);
+  const sw = Math.round(sourceW * (QUESTION_ROI.right - QUESTION_ROI.left));
+  const sh = Math.round(sourceH * (QUESTION_ROI.bottom - QUESTION_ROI.top));
+  const scale = Math.min(2, 1800 / sw);
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(sw * scale));
+  c.height = Math.max(1, Math.round(sh * scale));
+  const g = c.getContext("2d", { alpha: false });
+  g.imageSmoothingEnabled = true;
+  g.imageSmoothingQuality = "high";
+  g.drawImage(video, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  try {
+    const img = g.getImageData(0, 0, c.width, c.height);
+    const p = img.data;
+    for (let i = 0; i < p.length; i += 4) {
+      const gray = 0.299*p[i] + 0.587*p[i+1] + 0.114*p[i+2];
+      const v = gray < 145 ? 0 : 255;
+      p[i] = p[i+1] = p[i+2] = v;
+    }
+    g.putImageData(img, 0, 0);
+  } catch {}
+  return c;
+}
+
+async function runOCR(imageCanvas) {
+  const worker = await ensureOCRWorker();
+  const result = await worker.recognize(imageCanvas);
+  return result?.data?.text || "";
 }
 
 function grayAt(data, x, y) {
@@ -519,97 +567,6 @@ function meanDifference(a, b) {
     }
   }
   return total / count;
-}
-
-function changeMetrics(a, b) {
-  let total = 0;
-  let count = 0;
-  let changedPixels = 0;
-  let changedBlocks = 0;
-
-  for (let by = 12; by < 112; by += 6) {
-    for (let bx = 10; bx < 182; bx += 6) {
-      let blockDiff = 0;
-      let blockCount = 0;
-      for (let y = by; y < Math.min(by + 6, 113); y++) {
-        for (let x = bx; x < Math.min(bx + 6, 183); x++) {
-          if (!inQuestionRegion(x, y)) continue;
-          const d = Math.abs(grayAt(a, x, y) - grayAt(b, x, y));
-          blockDiff += d;
-          blockCount++;
-          total += d;
-          count++;
-          if (d >= 15) changedPixels++;
-        }
-      }
-      if (blockCount && blockDiff / blockCount >= 4.0) changedBlocks++;
-    }
-  }
-
-  return {
-    mean: count ? total / count : 0,
-    changedRatio: count ? changedPixels / count : 0,
-    changedBlocks
-  };
-}
-
-function alignedChangeMetrics(a, b) {
-  // Find the tiny camera translation that best aligns the current frame to
-  // the last analyzed frame. This suppresses hand/table shake while preserving
-  // local changes such as one digit or one character changing.
-  let best = { score: Infinity, dx: 0, dy: 0 };
-  for (let dy = -3; dy <= 3; dy++) {
-    for (let dx = -3; dx <= 3; dx++) {
-      let total = 0;
-      let count = 0;
-      for (let y = 16; y <= 108; y += 3) {
-        for (let x = 14; x <= 178; x += 3) {
-          const xx = x + dx;
-          const yy = y + dy;
-          if (xx < 10 || xx > 182 || yy < 12 || yy > 112) continue;
-          total += Math.abs(grayAt(a, x, y) - grayAt(b, xx, yy));
-          count++;
-        }
-      }
-      const score = count ? total / count : Infinity;
-      if (score < best.score) best = { score, dx, dy };
-    }
-  }
-
-  let residualTotal = 0;
-  let residualCount = 0;
-  let changedPixels = 0;
-  let changedBlocks = 0;
-
-  for (let by = 12; by < 112; by += 5) {
-    for (let bx = 10; bx < 183; bx += 5) {
-      let block = 0;
-      let blockCount = 0;
-      for (let y = by; y < Math.min(by + 5, 113); y++) {
-        for (let x = bx; x < Math.min(bx + 5, 183); x++) {
-          if (!inQuestionRegion(x, y)) continue;
-          const xx = x + best.dx;
-          const yy = y + best.dy;
-          if (xx < 10 || xx > 182 || yy < 12 || yy > 112) continue;
-          const d = Math.abs(grayAt(a, x, y) - grayAt(b, xx, yy));
-          residualTotal += d;
-          residualCount++;
-          block += d;
-          blockCount++;
-          if (d >= 12) changedPixels++;
-        }
-      }
-      if (blockCount && block / blockCount >= 3.0) changedBlocks++;
-    }
-  }
-
-  return {
-    residualMean: residualCount ? residualTotal / residualCount : 0,
-    changedRatio: residualCount ? changedPixels / residualCount : 0,
-    changedBlocks,
-    dx: best.dx,
-    dy: best.dy
-  };
 }
 
 function visualSignature(data) {
@@ -770,13 +727,18 @@ async function analyzeCapturedFrame(capture, manual, signature = null) {
     // Freeze the answered question as the reference. The handoff
     // gives the user time to switch screens/questions before detection starts.
     const answeredReference = baseline ? new Uint8ClampedArray(baseline) : (previous ? new Uint8ClampedArray(previous) : null);
-    startNextQuestionCountdown(answeredReference);
+    watchState = "WATCH_NEXT";
+    baseline = captureDetectorFrame() || baseline;
+    setBadge("WATCHING NEXT", "live");
+    setStatus("Watching for new question", "Waiting for the actual question content to change. No timer is used.");
   } catch (err) {
     setBadge("ERROR", "busy");
     const message = err?.name === "AbortError"
       ? "AI timed out. Waiting for the next question."
       : (err.message || "Try again.");
-    setStatus("Analysis failed", message);
+    watchState = "WATCH_NEXT";
+    setBadge("ERROR", "busy");
+    setStatus("Analysis failed", message + " Continuing to watch; you can retry with Analyze Now.");
   } finally {
     busy = false;
 

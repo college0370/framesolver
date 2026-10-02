@@ -179,31 +179,6 @@ footer {
 .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0}.stats div{padding:10px;border-radius:12px;background:#f3f4f6;text-align:center}.stats span{display:block;font-size:11px;color:#6b7280}.stats strong{display:block;margin-top:3px}.answer-actions{display:flex;gap:8px}.answer-actions button{white-space:nowrap}
 
 
-.next-question-countdown {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 12;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 11px;
-  border-radius: 12px;
-  background: rgba(7, 12, 22, .88);
-  color: #fff;
-  border: 1px solid rgba(255,255,255,.18);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 8px 24px rgba(0,0,0,.3);
-  font-size: 12px;
-  font-weight: 700;
-}
-.next-question-countdown strong {
-  min-width: 22px;
-  text-align: center;
-  font-size: 18px;
-  line-height: 1;
-}
-.next-question-countdown.hidden { display: none; }
 
 /* Parakeet-style answer overlay */
 .answer-popup {

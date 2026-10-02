@@ -22,7 +22,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "FrameSolve Web",
-    version: "5.9.0",
+    version: "8.0.0",
     primary: { provider: "Groq", model: groqModel },
     fallback: { provider: "Gemini", model: geminiModel }
   });
